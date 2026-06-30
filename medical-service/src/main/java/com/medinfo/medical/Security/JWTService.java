@@ -1,6 +1,5 @@
-package com.medinfo.auth.Security;
+package com.medinfo.medical.Security;
 
-import com.medinfo.auth.Entity.User;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,19 +19,7 @@ public class JWTService     {
     @Value("${jwt.expiration}")
     private long jwtExpiration;
 
-    public String generateToken(User user){
-        Map<String, Object> claims = new HashMap<>();
 
-        claims.put("userId", user.getId());
-        claims.put("role", "USER");
-        return Jwts.builder()
-                .claims(claims)
-                .subject(user.getEmail())
-                .issuedAt(new Date(System.currentTimeMillis()))
-                .expiration(new Date(System.currentTimeMillis()+jwtExpiration))
-                .signWith(getSigningKey())
-                .compact();
-    }
     public Long extractUserId(String token) {
         Object userId = Jwts.parser()
                 .verifyWith(getSigningKey())
