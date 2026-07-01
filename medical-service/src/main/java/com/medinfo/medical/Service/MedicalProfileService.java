@@ -3,32 +3,28 @@ package com.medinfo.medical.Service;
 import com.medinfo.medical.DTO.CreateMedicalProfileDTO;
 import com.medinfo.medical.DTO.MedicalProfileResponseDTO;
 import com.medinfo.medical.Entity.MedicalProfile;
+import com.medinfo.medical.Exception.ResourceAlreadyExistsException;
+import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
-import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
 public class MedicalProfileService {
     private final MedicalProfileRepository medicalProfileRepository;
 
-    public String getUsername(){
-        Authentication authentication= SecurityContextHolder.getContext()
-                .getAuthentication();
-        return authentication.getName();
-    }
     public MedicalProfile createProfile(CreateMedicalProfileDTO createMedicalProfileDTO){
-        String email=getUsername();
-        Long userId=(Long)
-                SecurityContextHolder.getContext()
-                        .getAuthentication()
-                        .getPrincipal();
+        Long userId=getCurrentUserId();
         if(medicalProfileRepository.existsByUserId(userId)){
-            throw new RuntimeException("Profile Already Exists");
+            throw new ResourceAlreadyExistsException(
+                    "Medical Profile",
+                    "userId",
+                    userId
+            );
+
         }
         MedicalProfile medicalProfile=MedicalProfile.builder()
                 .age(createMedicalProfileDTO.getAge())
@@ -42,17 +38,17 @@ public class MedicalProfileService {
                 .organDonor(createMedicalProfileDTO.isOrganDonor())
                 .userId(userId)
                 .build();
-        medicalProfileRepository.save(medicalProfile);
-        return medicalProfile;
+
+        return medicalProfileRepository.save(medicalProfile);
     }
     public MedicalProfile updateProfile(CreateMedicalProfileDTO createMedicalProfileDTO){
-        String email=getUsername();
-        Long userId=(Long)
-                SecurityContextHolder.getContext()
-                        .getAuthentication()
-                        .getPrincipal();
+        Long userId=getCurrentUserId();
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
-                        .orElseThrow(()->new RuntimeException("Profile does not exists"));
+                        .orElseThrow(()->new ResourceNotFoundException(
+                                "Medical Profile",
+                                "userId",
+                                userId
+                        ));
         medicalProfile.setAge(createMedicalProfileDTO.getAge());
         medicalProfile.setGender(createMedicalProfileDTO.getGender());
         medicalProfile.setBloodGroup(createMedicalProfileDTO.getBloodGroup());
@@ -63,23 +59,23 @@ public class MedicalProfileService {
         medicalProfile.setMedicalConditions(createMedicalProfileDTO.getMedicalConditions());
         medicalProfile.setOrganDonor(createMedicalProfileDTO.isOrganDonor());
         medicalProfile.setUserId(userId);
-        medicalProfileRepository.save(medicalProfile);
-        return medicalProfile;
+        return medicalProfileRepository.save(medicalProfile);
+
     }
 
 
     public MedicalProfileResponseDTO getMyProfile(){
-        String email=getUsername();
-        Long userId=(Long)
-                SecurityContextHolder.getContext()
-                        .getAuthentication()
-                        .getPrincipal();
+        Long userId=getCurrentUserId();
         MedicalProfile medicalProfile =
                 medicalProfileRepository
                         .findByUserId(userId)
                         .orElseThrow(() ->
-                                new RuntimeException("Profile Not Found"));
-        MedicalProfileResponseDTO medicalProfileResponseDTO=MedicalProfileResponseDTO.builder()
+                                new ResourceNotFoundException(
+                                        "Medical Profile",
+                                        "userId",
+                                        userId
+                                ));
+        return MedicalProfileResponseDTO.builder()
                 .age(medicalProfile.getAge())
                 .gender(medicalProfile.getGender())
                 .bloodGroup(medicalProfile.getBloodGroup())
@@ -90,19 +86,20 @@ public class MedicalProfileService {
                 .currentMedications(medicalProfile.getCurrentMedications())
                 .organDonor(medicalProfile.isOrganDonor())
                 .build();
-        return medicalProfileResponseDTO;
 
     }
 
     public String deleteProfile(){
-        String email=getUsername();
-        Long userId=(Long)
-                SecurityContextHolder.getContext()
-                        .getAuthentication()
-                        .getPrincipal();
+        Long userId=getCurrentUserId();
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
-                .orElseThrow(()-> new RuntimeException("Medical Profile not Found"));
+                .orElseThrow(()-> new ResourceNotFoundException("Medical Profile","userId",userId));
         medicalProfileRepository.delete(medicalProfile);
         return "Medical Profile Deleted Successfully";
+    }
+
+    private Long getCurrentUserId() {
+        return (Long) SecurityContextHolder.getContext()
+                .getAuthentication()
+                .getPrincipal();
     }
 }

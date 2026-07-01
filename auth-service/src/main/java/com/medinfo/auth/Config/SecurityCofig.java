@@ -33,8 +33,9 @@ public class SecurityCofig {
         http.authorizeHttpRequests(auth->
                 auth
                         .requestMatchers(
-                                "/api/auth/**",
-                                "/api/emergency/**",
+                                "/api/auth/login",
+                                "/api/auth/register",
+                                "/api/auth/users/public/**",
                                 "/h2-console/**"
                         ).permitAll()
                         .anyRequest()

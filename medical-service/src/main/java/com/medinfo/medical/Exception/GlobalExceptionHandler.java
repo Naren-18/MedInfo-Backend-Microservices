@@ -1,5 +1,8 @@
-package com.medinfo.auth.Exception;
+package com.medinfo.medical.Exception;
 
+import com.medinfo.medical.Exception.ResourceAlreadyExistsException;
+import com.medinfo.medical.Exception.ResourceNotFoundException;
+import com.medinfo.medical.Exception.UnauthorizedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

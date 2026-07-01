@@ -1,15 +1,20 @@
 package com.medinfo.medical.Service;
 
+import com.medinfo.medical.Client.AuthClient;
 import com.medinfo.medical.DTO.EContactsDTO;
 import com.medinfo.medical.DTO.EmergencyProfileResponseDTO;
 import com.medinfo.medical.DTO.MedicalProfileResponseDTO;
+import com.medinfo.medical.DTO.UserPublicResponseDTO;
 import com.medinfo.medical.Entity.EmergencyAccessLog;
 import com.medinfo.medical.Entity.EmergencyContacts;
 import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Enum.AccessMethod;
+import com.medinfo.medical.Exception.ResourceNotFoundException;
+import com.medinfo.medical.Exception.ServiceUnavailableException;
 import com.medinfo.medical.Repository.EmergencyAccessLogRepository;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
+import feign.FeignException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.AllArgsConstructor;
 import org.springframework.security.core.Authentication;
@@ -25,10 +30,20 @@ public class EmergencyService {
     private final EmergencyContactsRepository emergencyContactsRepository;
     private final MedicalProfileRepository medicalProfileRepository;
     private final EmergencyAccessLogService emergencyAccessLogService;
-
+    private final AuthClient authClient;
     public EmergencyProfileResponseDTO getEmergencyProfile(String publicProfileId, HttpServletRequest request){
 
-        Long userId=1L;
+        UserPublicResponseDTO responseDTO;
+        try {
+             responseDTO =
+                    authClient.getUserByPublicProfileId(publicProfileId);
+
+        } catch (feign.RetryableException ex) {
+            throw new ServiceUnavailableException(
+                    "Auth Service is not available"
+            );
+        }
+        Long userId=responseDTO.getUserId();
         emergencyAccessLogService.logAccess(
                 userId,
                 request,
@@ -36,11 +51,15 @@ public class EmergencyService {
         );
 
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
-                .orElseThrow(()->new RuntimeException("Medical Profile does not Exits"));
+                .orElseThrow(()->new ResourceNotFoundException(
+                        "Medical Profile",
+                        "userId",
+                        userId
+                ));
         List<EmergencyContacts> emergencyContacts=emergencyContactsRepository.findAllByUserId(userId);
 
         return EmergencyProfileResponseDTO.builder()
-                .fullName("Blank user")
+                .fullName(responseDTO.getFullName())
                 .age(medicalProfile.getAge())
                 .gender(medicalProfile.getGender())
                 .bloodGroup(medicalProfile.getBloodGroup())
