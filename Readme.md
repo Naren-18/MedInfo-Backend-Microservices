@@ -10,6 +10,7 @@ In a medical emergency, first responders can scan a QR code to instantly access 
 
 ```
 MedInfo-Backend-Microservices
+├── eureka-server       # Service Registry (Netflix Eureka)
 ├── auth-service        # Authentication & user identity
 ├── medical-service     # Medical profiles, contacts, emergency access
 ├── postman
@@ -27,47 +28,56 @@ MedInfo-Backend-Microservices
 ## 🏗️ Current Architecture
 
 ```
-                    Client
-                       │
-                       │ JWT
-                       ▼
+                    Eureka Server (8761)
+                         │
+         ┌───────────────┴───────────────┐
+         │                               │
+         ▼                               ▼
 
-             Medical Service (8082)
-
-        Medical Profile APIs
-        Emergency APIs
-        Emergency Contacts
-
-                       │
-                 OpenFeign Client
-                       │
-                       ▼
-
-               Auth Service (8081)
-
-       Registration
-       Login
-       JWT Generation
-       Public User API
-
+    AUTH-SERVICE (8081)          MEDICAL-SERVICE (8082)
+         ▲                               │
+         │                               │
+         └────────────OpenFeign──────────┘
 ```
 
 ```
-Auth Service  →  auth_db   (PostgreSQL)
+Client
+↓
+Medical Service
+↓
+OpenFeign
+↓
+Eureka Server  →  "Where is AUTH-SERVICE?"
+↓
+Authentication Service
+↓
+User Details
+↓
+Medical Service → Medical Profile → Emergency Contacts
+↓
+EmergencyProfileResponseDTO
+↓
+Client
+```
+
+```
+Auth Service     →  auth_db     (PostgreSQL)
 Medical Service  →  medical_db  (PostgreSQL)
 ```
 
-> **Next:** API Gateway + Eureka Service Registry will sit in front of both services, removing hardcoded service URLs from the Feign client.
+> **Next:** API Gateway — single public entry point in front of both services, integrated with Eureka.
 
-| Service | Owns |
-|---|---|
-| **Auth Service** | User, Login, Registration, JWT Generation, Spring Security, Public User API |
-| **Medical Service** | Medical Profile, Emergency Contacts, Emergency Access Log, Emergency Profile APIs, OpenFeign Client |
+| Service | Port | Owns |
+|---|---|---|
+| **Eureka Server** | 8761 | Service Registry, Heartbeats, Dashboard |
+| **Auth Service** | 8081 | User, Login, Registration, JWT Generation, Spring Security, Public User API |
+| **Medical Service** | 8082 | Medical Profile, Emergency Contacts, Emergency Access Log, Emergency Profile APIs, OpenFeign Client |
 
 **Core principles:**
 - One database per service — services never share or cross-query each other's databases
 - Only Auth Service generates JWT tokens — every other service validates independently using a shared signing secret
 - Services communicate via REST APIs (OpenFeign), not shared databases or shared entities
+- **Services locate each other by logical name through Eureka — no hardcoded URLs anywhere** (Day 3)
 
 Each service has:
 - ✅ Independent Spring Boot application
@@ -76,12 +86,52 @@ Each service has:
 - ✅ Independent Security Configuration
 - ✅ Independent Deployment
 - ✅ Clear ownership of its business domain
+- ✅ Registered with Eureka Service Registry
+
+---
+
+## 🧭 eureka-server
+
+Status: ✅ **Complete** — running with both services registered.
+
+### What it does
+- Central **Service Registry** — every microservice registers itself at startup
+- Stores service name, host, port, status, and health information
+- Receives periodic **heartbeats** from registered services
+- Answers discovery queries: *"Where is AUTH-SERVICE?"* → current address
+- Dashboard at `http://localhost:8761`
+
+### Setup
+
+```java
+@EnableEurekaServer
+@SpringBootApplication
+public class EurekaServerApplication {
+}
+```
+
+**Dependencies:**
+- Spring Cloud Netflix Eureka Server
+
+### Configuration
+
+```properties
+spring.application.name=eureka-server
+
+server.port=8761
+
+# The server itself is not a client
+eureka.client.register-with-eureka=false
+eureka.client.fetch-registry=false
+```
+
+> ℹ️ **Self Preservation Mode:** In local development the dashboard may show an "EMERGENCY!" warning. This is expected — Eureka avoids evicting instances when heartbeat traffic is low. In production with many services this disappears automatically. No configuration change required.
 
 ---
 
 ## 🔐 auth-service
 
-Status: ✅ **Complete** — fully independent and running.
+Status: ✅ **Complete** — fully independent, registered with Eureka.
 
 ### Structure
 
@@ -92,23 +142,23 @@ auth-service
 │
 ├── controller
 │      AuthController.java ✅
-│      UserController.java ✅         ← New (Day 2)
+│      UserController.java ✅
 │
 ├── dto
 │      LoginRequestDTO.java ✅
 │      RegisterRequestDTO.java ✅
-│      UserPublicResponseDTO.java ✅  ← New (Day 2)
+│      UserPublicResponseDTO.java ✅
 │
 ├── entity
 │      User.java ✅
 │
 ├── exception
 │      GlobalExceptionHandler.java ✅
-│      ResourceNotFoundException.java ✅       ← New (Day 2)
-│      ResourceAlreadyExistsException.java ✅  ← New (Day 2)
-│      UnauthorizedException.java ✅           ← New (Day 2)
-│      ServiceUnavailableException.java ✅     ← New (Day 2)
-│      ErrorResponse.java ✅                   ← New (Day 2)
+│      ResourceNotFoundException.java ✅
+│      ResourceAlreadyExistsException.java ✅
+│      UnauthorizedException.java ✅
+│      ServiceUnavailableException.java ✅
+│      ErrorResponse.java ✅
 │
 ├── repository
 │      UserRepository.java ✅
@@ -130,8 +180,9 @@ auth-service
 - JWT generation — includes **custom claims** (`userId`, `role`) so downstream services authenticate without a database lookup
 - JWT validation via `JWTAuthenticationFilter` (runs on every request)
 - `CustomUserDetailsService` — loads user from DB for Spring Security
-- **Public User API** — `GET /api/users/public/{publicProfileId}` returns `userId` + `fullName` for downstream services (Day 2)
-- Centralized exception handling with custom exceptions and `ErrorResponse` model (Day 2)
+- **Public User API** — `GET /api/users/public/{publicProfileId}` returns `userId` + `fullName` for downstream services
+- Centralized exception handling with custom exceptions and `ErrorResponse` model
+- **Eureka Client** — registers as `AUTH-SERVICE` and sends heartbeats (Day 3)
 
 ### Project Setup
 
@@ -153,6 +204,7 @@ Package      : com.medinfo.auth
 - Validation
 - Lombok
 - JJWT (`jjwt-api`, `jjwt-impl`, `jjwt-jackson`)
+- Spring Cloud Netflix Eureka Client ← Added Day 3
 
 ### Configuration
 
@@ -170,6 +222,11 @@ spring.jpa.show-sql=true
 
 jwt.secret=...
 jwt.expiration=900000
+
+# Eureka (Day 3)
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
 ```
 
 ⚠️ Never commit real credentials to Git. Use environment variables in production.
@@ -216,7 +273,7 @@ JWT payload contains custom claims:
 }
 ```
 
-**Get Public User by Profile ID** *(Day 2 — for inter-service use)*
+**Get Public User by Profile ID** *(inter-service use)*
 ```
 GET /api/users/public/{publicProfileId}
 Authorization: Bearer <jwt_token>
@@ -233,18 +290,18 @@ Response:
 
 ## 🩺 medical-service
 
-Status: ✅ **Complete** — fully independent, OpenFeign integrated, running.
+Status: ✅ **Complete** — fully independent, OpenFeign + Eureka integrated.
 
 ### Structure
 
 ```
 medical-service
 ├── client
-│      AuthClient.java ✅             ← New (Day 2)
+│      AuthClient.java ✅
 │
 ├── config
 │      SecurityConfig.java ✅
-│      FeignConfig.java ✅            ← New (Day 2)
+│      FeignConfig.java ✅
 │
 ├── controller
 │      EmergencyController.java ✅
@@ -256,7 +313,7 @@ medical-service
 │      MedicalProfileResponseDTO.java ✅
 │      EmergencyProfileResponseDTO.java ✅
 │      EContactsDTO.java ✅
-│      UserPublicResponseDTO.java ✅  ← New (Day 2)
+│      UserPublicResponseDTO.java ✅
 │
 ├── entity
 │      MedicalProfile.java ✅
@@ -265,12 +322,12 @@ medical-service
 │
 ├── exception
 │      GlobalExceptionHandler.java ✅
-│      ResourceNotFoundException.java ✅       ← New (Day 2)
-│      ResourceAlreadyExistsException.java ✅  ← New (Day 2)
-│      UnauthorizedException.java ✅           ← New (Day 2)
-│      ServiceUnavailableException.java ✅     ← New (Day 2)
-│      CustomFeignErrorDecoder.java ✅         ← New (Day 2)
-│      ErrorResponse.java ✅                   ← New (Day 2)
+│      ResourceNotFoundException.java ✅
+│      ResourceAlreadyExistsException.java ✅
+│      UnauthorizedException.java ✅
+│      ServiceUnavailableException.java ✅
+│      CustomFeignErrorDecoder.java ✅
+│      ErrorResponse.java ✅
 │
 ├── repository
 │      MedicalProfileRepository.java ✅
@@ -294,11 +351,12 @@ medical-service
 - Medical Profile CRUD
 - Emergency Contacts CRUD
 - Emergency Access Logging
-- Public Emergency Profile API — resolves `publicProfileId` → `userId` via OpenFeign call to Auth Service (Day 2)
+- Public Emergency Profile API — resolves `publicProfileId` → `userId` via OpenFeign call to Auth Service
 - **JWT validation only** — does not generate tokens, uses the same signing secret as Auth Service
 - **No direct access to Auth database** — entities store `userId` (Long) instead of a JPA `User` relationship
-- **OpenFeign client** (`AuthClient`) for inter-service REST calls (Day 2)
-- **Centralized exception framework** with custom exceptions, `ErrorResponse`, and `CustomFeignErrorDecoder` (Day 2)
+- **OpenFeign client** (`AuthClient`) — now resolves auth-service **by name through Eureka** (Day 3)
+- **Centralized exception framework** with custom exceptions, `ErrorResponse`, and `CustomFeignErrorDecoder`
+- **Eureka Client** — registers as `MEDICAL-SERVICE` and sends heartbeats (Day 3)
 
 ### Project Setup
 
@@ -319,7 +377,8 @@ Package      : com.medinfo.medical
 - PostgreSQL Driver
 - Validation
 - Lombok
-- Spring Cloud OpenFeign (`spring-cloud-starter-openfeign`) ← Added Day 2
+- Spring Cloud OpenFeign (`spring-cloud-starter-openfeign`)
+- Spring Cloud Netflix Eureka Client ← Added Day 3
 
 **Database:** `medical_db` · **Port:** `8082`
 
@@ -340,10 +399,16 @@ spring.jpa.show-sql=true
 # Same signing secret as auth-service — required for JWT signature verification
 jwt.secret=...
 jwt.expiration=900000
+
+# Eureka (Day 3)
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
 ```
 
-### OpenFeign — AuthClient
+### OpenFeign — AuthClient (now with Service Discovery)
 
+**Before (Day 2 — hardcoded):**
 ```java
 @FeignClient(
     name = "auth-service",
@@ -351,13 +416,16 @@ jwt.expiration=900000
 )
 ```
 
-Calls `GET /api/users/public/{publicProfileId}` on Auth Service.
+**After (Day 3 — resolved via Eureka):**
+```java
+@FeignClient(
+    name = "auth-service"
+)
+```
 
-Returns `UserPublicResponseDTO { userId, fullName }`.
+Feign asks Eureka *"Where is AUTH-SERVICE?"* before making the HTTP call. If Auth Service changes host, container, or port, Eureka provides the updated address — **no code changes, no redeployment of consumers**.
 
-> ⚠️ The `url` is currently hardcoded. Day 3 will replace this with Eureka Service Discovery.
-
-### Emergency Profile Flow (with OpenFeign)
+### Emergency Profile Flow (with Eureka)
 
 ```
 Emergency URL
@@ -365,6 +433,8 @@ Emergency URL
 Medical Service
 ↓
 AuthClient (OpenFeign)
+↓
+Eureka Server → resolves AUTH-SERVICE → localhost:8081
 ↓
 Auth Service → UserRepository
 ↓
@@ -377,7 +447,7 @@ Medical Service → EmergencyContactsRepository
 EmergencyProfileResponseDTO
 ```
 
-Medical Service never touches the auth database.
+Medical Service never touches the auth database — and never knows its address.
 
 ### Key Architectural Changes
 
@@ -432,6 +502,8 @@ UsernamePasswordAuthenticationToken authToken =
 - **Custom JWT claims avoid unnecessary database calls.** `userId` and `role` embedded in the token mean downstream services can authenticate with zero DB lookups.
 - **Each service owns its data. Others access it through APIs, never through the database.** `EmergencyService` calls Auth Service via OpenFeign to resolve `publicProfileId` → `userId` instead of querying `auth_db`.
 - **Feign Error Decoder only handles HTTP responses.** Connection failures (service offline) produce a `RetryableException`, not an HTTP response — handle both separately. Long-term solution: Resilience4j Circuit Breakers.
+- **Hardcoded service URLs don't survive real environments.** Services scale, restart, and move — Service Discovery lets consumers resolve providers by logical name, with zero code changes when locations change. (Day 3)
+- **Eureka's Self Preservation Mode is a feature, not a bug.** Low heartbeat traffic in local dev triggers the "EMERGENCY!" warning — Eureka is refusing to evict possibly-healthy instances. Expected locally, disappears in production. (Day 3)
 
 ---
 
@@ -457,20 +529,26 @@ UsernamePasswordAuthenticationToken authToken =
 - [x] Implemented centralized exception framework (custom exceptions + `ErrorResponse`)
 - [x] Introduced `CustomFeignErrorDecoder` via `FeignConfig`
 - [x] Implemented graceful handling of downstream service failures (503 response)
-- [ ] Replace hardcoded Feign URL with Eureka Service Discovery
-- [ ] Eureka Server
-- [ ] API Gateway
+- [x] Created Eureka Server (port 8761) — Day 3
+- [x] Registered auth-service as Eureka Client — Day 3
+- [x] Registered medical-service as Eureka Client — Day 3
+- [x] Removed hardcoded Feign URL — service resolved by logical name via Eureka — Day 3
+- [x] Verified heartbeats and registration on Eureka Dashboard — Day 3
+- [x] Validated end-to-end communication through service discovery — Day 3
+- [ ] API Gateway (routing, single entry point, Eureka-integrated)
 - [ ] Spring Cloud Config Server
 
 ---
 
 ## 📅 Current Status
 
-**Both services are running independently and communicating via OpenFeign.**
+**Three applications running: Eureka Server + two microservices, communicating through dynamic service discovery.** No hardcoded service addresses anywhere.
 
-One hardcoded URL remains in `AuthClient`:
-```java
-@FeignClient(name = "auth-service", url = "http://localhost:8081")
+One gap remains: the client still calls each microservice directly on its own port.
+
+```
+Client → Medical Service (8082)
+Client → Auth Service (8081)
 ```
 
-Next milestone: **Day 3 — Eureka Service Discovery** — register both services with Eureka Server so OpenFeign can resolve service locations dynamically instead of using hardcoded URLs 🚀
+Next milestone: **Day 4 — API Gateway** — a single public entry point that routes requests through Eureka to the right service, providing centralized routing, a foundation for gateway-level JWT validation, centralized CORS handling, and future rate limiting 🚀
