@@ -11,7 +11,7 @@ import org.springframework.stereotype.Service;
 public class AuditService {
     private final AuditRepository auditRepository;
 
-    public String createAuditLog(CreateAuditLogRequestDTO createAuditLogRequestDTO){
+    public AuditLog createAuditLog(CreateAuditLogRequestDTO createAuditLogRequestDTO){
 
         AuditLog auditLog=AuditLog.builder()
                 .ipAddress(createAuditLogRequestDTO.getIpAddress())
@@ -19,7 +19,7 @@ public class AuditService {
                 .userId(createAuditLogRequestDTO.getUserId())
                 .accessMethod(createAuditLogRequestDTO.getAccessMethod())
                 .build();
-        auditRepository.save(auditLog);
-        return "Audit Log Created Successfully";
+        return auditRepository.save(auditLog);
+
     }
 }

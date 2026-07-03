@@ -1,6 +1,7 @@
 package com.medinfo.audit.Controller;
 
 import com.medinfo.audit.DTO.CreateAuditLogRequestDTO;
+import com.medinfo.audit.Entity.AuditLog;
 import com.medinfo.audit.Service.AuditService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -16,7 +17,7 @@ public class AuditController {
     private final AuditService auditService;
 
     @PostMapping("/log")
-    public ResponseEntity<String> createAuditLog(@RequestBody CreateAuditLogRequestDTO createAuditLogRequestDTO){
+    public ResponseEntity<AuditLog> createAuditLog(@RequestBody CreateAuditLogRequestDTO createAuditLogRequestDTO){
         return ResponseEntity.ok(
                 auditService.createAuditLog(createAuditLogRequestDTO)
         );

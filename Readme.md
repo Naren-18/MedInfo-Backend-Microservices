@@ -71,7 +71,8 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 - Services communicate via REST APIs (OpenFeign), not shared databases or shared entities
 - Services locate each other by logical name through Eureka — no hardcoded URLs anywhere
 - Clients communicate with ONE endpoint — the Gateway routes everything
-- **Each business capability lives in its own bounded context — audit logging is not a medical concern** (Day 4)
+- Each business capability lives in its own bounded context — audit logging is not a medical concern (Day 4)
+- **Business logic is unit tested in isolation — no database, no HTTP, no Spring context** (Day 4)
 
 Each service has:
 - ✅ Independent Spring Boot application
@@ -80,6 +81,142 @@ Each service has:
 - ✅ Independent Deployment
 - ✅ Clear ownership of its business domain
 - ✅ Registered with Eureka Service Registry
+- ✅ JUnit 5 + Mockito unit test suite with JaCoCo coverage (business services)
+
+---
+
+## 🧪 Testing (Day 4)
+
+All three business services carry **JUnit 5 + Mockito** unit test suites with **JaCoCo** coverage reporting.
+
+### Testing Architecture
+
+```
+                      JUnit 5
+                         │
+                  Mockito Extension
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+   Mock Repository   Mock Feign      Mock Security
+        │                │                │
+        └────────────────┼────────────────┘
+                         │
+                  Service Under Test
+                         │
+                  Business Logic Only
+```
+
+**No PostgreSQL · No HTTP Requests · No Spring Boot Server · No Eureka · No API Gateway** — only business logic execution. Tests run in milliseconds, completely isolated from infrastructure.
+
+### auth-service Tests
+
+**AuthServiceTest** — business scenarios:
+- Successful User Registration
+- Duplicate Email Registration
+- Successful Login
+- Invalid Email Login
+- Invalid Password Login
+- Retrieve User using Public Profile ID
+- User Not Found
+
+Repository interactions, password encoding and JWT generation mocked with Mockito.
+
+```
+Register Request → existsByEmail() → PasswordEncoder → save() → Registration Success
+```
+
+**JWTServiceTest** — tested independently without Spring Security:
+- JWT Token Generation
+- Extract Username / Extract User ID / Extract Role
+- Validate Token
+- Invalid Username
+- Expired Token
+
+> 💡 **Reflection** was used to inject `secretKey` and `jwtExpiration` — these are normally injected via `@Value`, which doesn't run in a plain unit test.
+
+**CustomUserDetailsServiceTest:**
+- User Exists
+- User Not Found
+
+### medical-service Tests
+
+**MedicalProfileServiceTest:**
+- Create Medical Profile
+- Duplicate Profile
+- Update Profile
+- Retrieve Profile
+- Delete Profile
+- Profile Not Found
+
+Since the service reads the authenticated user from `SecurityContextHolder`, a **mocked SecurityContext** was built for every test:
+```
+Mock Authentication → Mock SecurityContext → SecurityContextHolder → Service
+```
+
+**EmergencyContactsServiceTest:**
+- Create Contact
+- Retrieve Contacts
+- Empty Contact List
+- Update Contact
+- Delete Contact
+- Contact Not Found
+- Unauthorized Update
+- Unauthorized Delete
+
+**Ownership validation verified by testing contacts belonging to different users.**
+
+**EmergencyServiceTest** — the service talks to multiple microservices; dependencies mocked:
+- Authentication Service (Feign)
+- Audit Service (Feign)
+- Medical Repository
+- Emergency Contact Repository
+
+Scenarios:
+- Successful Emergency Profile Retrieval
+- Empty Emergency Contact List
+- Authentication Service Unavailable
+- Medical Profile Missing
+- Audit Logging Verification
+
+Feign communication completely mocked — service-to-service interactions tested **without real HTTP requests**:
+```
+Medical Service → Mock Auth Client  → User DTO
+Medical Service → Mock Audit Client → Success Response
+```
+
+### audit-service Tests
+
+**AuditServiceTest:**
+- Successful Audit Log Creation
+- Repository Failure
+
+### Success and Failure Paths
+
+| Success Scenarios | Failure Scenarios |
+|---|---|
+| Resource Creation | Duplicate Resources |
+| Resource Retrieval | Missing Resources |
+| Resource Update | Invalid Credentials |
+| Resource Deletion | Unauthorized Access |
+| Authentication Success | Downstream Service Failure |
+| Emergency Profile Retrieval | Repository Exceptions |
+
+Testing both execution paths significantly improves confidence in business logic.
+
+### Code Coverage — JaCoCo
+
+The JaCoCo Maven Plugin was added to Authentication Service, Medical Service, and Audit Service.
+
+```bash
+mvn clean test
+```
+automatically: executes all unit tests → collects execution data → generates an HTML coverage report at:
+```
+target/site/jacoco/index.html
+```
+
+The report highlights covered classes, methods, lines, branches — and uncovered code that needs additional test cases.
 
 ---
 
@@ -187,7 +324,7 @@ eureka.client.fetch-registry=false
 
 ## 🔐 auth-service
 
-Status: ✅ **Complete** — fully independent, registered with Eureka, reachable via Gateway.
+Status: ✅ **Complete** — fully independent, registered with Eureka, reachable via Gateway, unit tested.
 
 ### Structure
 
@@ -227,6 +364,11 @@ auth-service
 ├── service
 │      AuthService.java ✅
 │
+├── test
+│      AuthServiceTest.java ✅              ← New (Day 4)
+│      JWTServiceTest.java ✅               ← New (Day 4)
+│      CustomUserDetailsServiceTest.java ✅ ← New (Day 4)
+│
 └── AuthServiceApplication.java ✅
 ```
 
@@ -239,6 +381,7 @@ auth-service
 - **Public User API** — `GET /api/users/public/{publicProfileId}` returns `userId` + `fullName` for downstream services
 - Centralized exception handling with custom exceptions and `ErrorResponse` model
 - **Eureka Client** — registers as `AUTH-SERVICE` and sends heartbeats
+- **Fully unit tested** — registration, login, JWT lifecycle, user lookup (Day 4)
 
 ### Project Setup
 
@@ -261,6 +404,7 @@ Package      : com.medinfo.auth
 - Lombok
 - JJWT (`jjwt-api`, `jjwt-impl`, `jjwt-jackson`)
 - Spring Cloud Netflix Eureka Client
+- Spring Boot Test + Mockito ← Day 4
 
 ### Configuration
 
@@ -347,7 +491,7 @@ Response:
 
 ## 🩺 medical-service
 
-Status: ✅ **Complete** — pure medical domain, audit logging delegated to Audit Service.
+Status: ✅ **Complete** — pure medical domain, audit logging delegated to Audit Service, unit tested.
 
 ### Structure
 
@@ -403,6 +547,11 @@ medical-service
 │      EmergencyService.java ✅
 │      (EmergencyAccessLogService — REMOVED) ← Day 4
 │
+├── test
+│      MedicalProfileServiceTest.java ✅     ← New (Day 4)
+│      EmergencyContactsServiceTest.java ✅  ← New (Day 4)
+│      EmergencyServiceTest.java ✅          ← New (Day 4)
+│
 └── MedicalServiceApplication.java ✅
 ```
 
@@ -416,6 +565,7 @@ medical-service
 - **Two OpenFeign clients** — `AuthClient` (user resolution) and `AuditClient` (audit logging), both resolved by name through Eureka
 - **Centralized exception framework** with custom exceptions, `ErrorResponse`, and `CustomFeignErrorDecoder`
 - **Eureka Client** — registers as `MEDICAL-SERVICE`
+- **Fully unit tested** — CRUD paths, ownership validation across users, mocked Feign clients including downstream-unavailable, mocked SecurityContext (Day 4)
 
 ### Project Setup
 
@@ -438,6 +588,7 @@ Package      : com.medinfo.medical
 - Lombok
 - Spring Cloud OpenFeign (`spring-cloud-starter-openfeign`)
 - Spring Cloud Netflix Eureka Client
+- Spring Boot Test + Mockito ← Day 4
 
 **Database:** `medical_db` · **Port:** `8082`
 
@@ -540,17 +691,20 @@ Emergency Profile Viewed → AuditClient (Feign) → Audit Service → audit_db
 | 503 | ServiceUnavailableException |
 | 500 | Generic handler |
 
+`CustomFeignErrorDecoder` maps HTTP errors from downstream services into the correct custom exceptions. Connection failures (no HTTP response) are caught at the service level and mapped to `ServiceUnavailableException` → 503.
+
 ---
 
 ## 🧾 audit-service
 
-Status: ✅ **Complete** — fourth microservice, single source of truth for auditing. *(New — Day 4)*
+Status: ✅ **Complete** — fourth microservice, single source of truth for auditing, unit tested.
 
 ### What it does
 - Receives audit events from other backend services via REST
 - Persists every emergency profile access: who, from where, with what client, how, and when
 - Designed **generically** (`AuditLog`, not `EmergencyAccessLog`) so future events — user login, profile updates, contact modifications, password changes — land in the same service
 - **Internal-only service**: no Spring Security, no Gateway route — receives requests only from other backend services
+- **Unit tested** — successful audit log creation + repository failure (Day 4)
 
 ### Project Setup
 
@@ -631,6 +785,10 @@ Flow: `AuditController` → `AuditService` → DTO converted to `AuditLog` entit
 - **A capability that isn't part of your domain belongs in its own service.** Audit logging worked inside Medical Service but violated bounded context — extraction gave it its own database, its own scaling, and made it reusable for future event types. (Day 4)
 - **Design extracted domains generically.** Renaming `EmergencyAccessLog` → `AuditLog` turned a single-purpose table into a platform capability that can absorb login events, profile updates, and password changes without redesign. (Day 4)
 - **Internal services don't automatically need Spring Security.** The Audit Service receives traffic only from backend services — deliberate omission, not oversight. (Day 4)
+- **Unit tests isolate business logic from infrastructure.** Mock the repository, mock the Feign clients, mock the SecurityContext — tests run in milliseconds with no PostgreSQL, no HTTP, no Spring Boot server. (Day 4)
+- **Test the failure paths, not just the happy path.** Duplicates, missing resources, invalid credentials, unauthorized access across users, downstream service unavailability, repository exceptions — failures are where production bugs live. (Day 4)
+- **`@Value` fields need reflection in plain unit tests.** Spring's property injection doesn't run without a Spring context — inject `secretKey`/`jwtExpiration` manually via reflection. (Day 4)
+- **Coverage reports show what you *haven't* tested.** JaCoCo's branch/line breakdown turns "I think it's tested" into "I know what's missing." (Day 4)
 
 ---
 
@@ -664,8 +822,19 @@ Flow: `AuditController` → `AuditService` → DTO converted to `AuditLog` entit
 - [x] Implemented `AuditClient` Feign client in Medical Service — Day 4
 - [x] Migrated audit logging from Medical Service to Audit Service — Day 4
 - [x] Removed `EmergencyAccessLog` entity, repository, and service from Medical Service — Day 4
-- [ ] Unit Testing (JUnit 5 & Mockito)
-- [ ] Kafka for asynchronous audit event processing
+- [x] Introduced JUnit 5 for unit testing — Day 4
+- [x] Implemented Mockito-based dependency mocking — Day 4
+- [x] Tested Authentication Service (AuthServiceTest) — Day 4
+- [x] Tested JWT Service (JWTServiceTest, `@Value` fields via reflection) — Day 4
+- [x] Tested CustomUserDetailsService — Day 4
+- [x] Tested MedicalProfileService (mocked SecurityContextHolder) — Day 4
+- [x] Tested EmergencyContactsService (ownership validation across users) — Day 4
+- [x] Tested EmergencyService (mocked Auth + Audit Feign clients, downstream failure) — Day 4
+- [x] Tested AuditService (creation + repository failure) — Day 4
+- [x] Tested success and failure scenarios across all services — Day 4
+- [x] Integrated JaCoCo for code coverage in all three business services — Day 4
+- [x] Generated HTML coverage reports (`target/site/jacoco/index.html`) — Day 4
+- [ ] Kafka for asynchronous audit event processing (Day 5)
 - [ ] Redis Caching
 - [ ] Docker & Docker Compose
 - [ ] CI/CD with GitHub Actions
@@ -675,14 +844,18 @@ Flow: `AuditController` → `AuditService` → DTO converted to `AuditLog` entit
 
 ## 📅 Current Status
 
-**Five applications running: API Gateway + Eureka Server + three business microservices** (auth, medical, audit), each with its own database, communicating exclusively through Eureka-resolved Feign calls.
+**Five applications running: API Gateway + Eureka Server + three business microservices** (auth, medical, audit), each with its own database, communicating exclusively through Eureka-resolved Feign calls — **and all three business services fully unit tested with JaCoCo coverage reporting.**
 
 ```
 Client → Gateway → Eureka → { AUTH, MEDICAL, AUDIT }
 Medical → Feign → Auth   (user resolution)
 Medical → Feign → Audit  (audit logging)
+
+mvn clean test → JaCoCo HTML report per service
 ```
 
-Bounded contexts are now clean: Medical Service owns only medical data; Audit Service is the single source of truth for auditing.
+Bounded contexts are clean: Medical Service owns only medical data; Audit Service is the single source of truth for auditing.
 
-Next phase: **Production readiness** — Unit Testing (JUnit 5 + Mockito), Kafka for asynchronous audit event processing (replacing the synchronous Feign audit call), Redis Caching, Docker & Docker Compose, CI/CD with GitHub Actions, and Cloud Deployment 🚀
+One architectural improvement queued: the Medical → Audit Feign call is **synchronous** — audit persistence blocks the emergency profile response, and the two services remain tightly coupled at runtime.
+
+Next milestone: **Day 5 — Event-Driven Architecture with Apache Kafka** — Kafka fundamentals, producers and consumers, topics and partitions, consumer groups, event design, publishing emergency access events, consuming them in Audit Service, and removing the synchronous Feign audit communication entirely 🚀
