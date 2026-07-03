@@ -1,135 +1,299 @@
-# 🏥 MedInfo
+# 🏥 MedInfo — Microservices
 
-MedInfo is a Spring Boot application that allows users to store their medical information and generate a QR code for emergency access. In a medical emergency, first responders can scan the QR code to instantly access critical health information — no login required.
+MedInfo is being migrated from a Spring Boot monolith into independent microservices. This repository is a **monorepo** containing all services that make up the MedInfo backend.
 
-**Personal Story:** This project was built after the developer underwent ENT surgery due to hypertension and realized that in an emergency, no one would have access to their medical history. MedInfo solves this problem.
-
----
-
-## 🚀 Features Implemented
-
-### 👤 User Registration
-- Register with full name, email, and password
-- Email uniqueness validation
-- Password encryption using BCrypt
-- UUID generated automatically as public profile ID
-- Request validation using `@NotBlank`, `@Email`, `@Size`
-
-### 🔐 User Login
-- Login using email and password
-- Secure password verification using BCrypt
-- Returns signed JWT token on successful login
-
-### 🛡️ JWT Authentication
-- Stateless authentication — no sessions stored on server
-- JWT generated on login using JJWT library
-- Token contains: subject (email), issued-at, expiration (15 minutes)
-- Every protected request validated via JWT filter
-- `JWTService` — generates, validates, and extracts claims from tokens
-- `CustomUserDetailsService` — loads user from DB using email extracted from JWT
-- `JWTAuthenticationFilter` — runs on every request, validates token, sets Spring Security context
-
-### 🩺 Medical Profile Management
-- One User ↔ One Medical Profile (`@OneToOne`)
-- Full CRUD — Create, Read, Update, Delete
-- JWT-protected — only logged-in user can access their own profile
-- Current user identified via `SecurityContextHolder`
-- Stores: age, gender, blood group, height, weight, allergies, medical conditions, medications, organ donor status
-
-### 🆘 Emergency Contacts Management
-- One User ↔ Many Emergency Contacts (`@ManyToOne`)
-- Full CRUD — Create, Read, Update, Delete
-- JWT-protected — only logged-in user can manage their contacts
-- Ownership validation — users can only modify their own contacts
-- Stores: name, relationship, phone number
-- `@PathVariable` used to identify specific contact for update/delete
-
-### 🚨 Public Emergency Access
-- `GET /api/emergency/{uuid}` — no login required
-- UUID generated at registration — impossible to guess (not sequential IDs)
-- Returns full medical profile + emergency contacts in a single response
-- Prevents IDOR — Insecure Direct Object Reference attack
-- Foundation for QR code scanning in emergencies
-
-### 🧾 Emergency Access Audit Logging
-- Every successful access to `GET /api/emergency/{publicProfileId}` is recorded
-- Dedicated `EmergencyAccessLog` entity — preserves complete access history (not just last access)
-- Captures: access timestamp (`@CreationTimestamp`), IP address, user agent, access method
-- `AccessMethod` enum (`QR`, `URL`) — type-safe, easily extensible (future: `MOBILE_APP`, `NFC`)
-- `EmergencyAccessLogService` — separated from `EmergencyService` to follow Single Responsibility Principle
-- Foundation for future Notifications, Analytics, Kafka event publishing, and Security Auditing
-- Controller remains unchanged — only `EmergencyService` delegates to the new logging service
-
-### ⚠️ Global Exception Handling
-- Centralized exception management with `@RestControllerAdvice`
-- Clean JSON error responses for all exceptions
-- Validation error handling (`MethodArgumentNotValidException`)
-
-### 💾 Database
-- PostgreSQL via Neon (cloud-hosted, free tier)
-- Spring Data JPA + Hibernate ORM
-- Data persists across restarts — no more data loss on restart
-- Custom repository methods (`findByEmail`, `existsByEmail`, `findByUser`, `existsByUser`, `findAllByUser`, `findByPublicProfileId`, `findAllByUser` for audit logs)
-
-### 🔒 Security
-- Spring Security with stateless session policy
-- BCrypt password hashing
-- JWT-protected APIs (`/api/auth/**` and `/api/emergency/**` public, everything else requires token)
-- Ownership validation on all record-specific operations
-- UUID-based public access — prevents sequential ID enumeration
-- CSRF disabled (REST API — no browser sessions)
+In a medical emergency, first responders can scan a QR code to instantly access critical health information — no login required. This migration restructures the original monolith into independently deployable services while keeping that core mission intact.
 
 ---
 
-## 🏗️ Tech Stack
+## 📂 Repository Structure
 
-| Layer | Technology |
+```
+MedInfo-Backend-Microservices
+├── eureka-server       # Service Registry (Netflix Eureka)
+├── gateway-service     # API Gateway (Spring Cloud Gateway)
+├── auth-service        # Authentication & user identity
+├── medical-service     # Medical profiles, contacts, emergency access
+├── audit-service       # Centralized audit logging
+├── postman
+└── README.md
+```
+
+**Why a Monorepo?**
+- Easier local development
+- Simpler GitHub management
+- Easier CI/CD during learning
+- Common industry approach for medium-sized projects
+
+---
+
+## 🏗️ Current Architecture
+
+```
+                           Client
+                              │
+                              ▼
+                     API Gateway (8080)
+                              │
+                       Eureka Discovery
+                              │
+        ┌──────────────┬──────────────┬──────────────┐
+        ▼              ▼              ▼
+
+   AUTH SERVICE   MEDICAL SERVICE   AUDIT SERVICE
+     (8081)          (8082)           (8083)
+        ▲              │  │              ▲
+        │              │  │              │
+        └────Feign─────┘  └────Feign─────┘
+
+   auth_db         medical_db        audit_db
+
+                 Eureka Server (8761)
+```
+
+**Gateway Request Lifecycle:**
+```
+Client → API Gateway → Route Matching → Eureka Service Discovery
+       → Target Microservice → Business Logic → Response → Client
+```
+
+| Service | Port | Owns |
+|---|---|---|
+| **API Gateway** | 8080 | Single public entry point, dynamic routing, Eureka-integrated load balancing |
+| **Eureka Server** | 8761 | Service Registry, Heartbeats, Dashboard |
+| **Auth Service** | 8081 | User, Login, Registration, JWT Generation, Spring Security, Public User API |
+| **Medical Service** | 8082 | Medical Profile, Emergency Contacts, Emergency Profile APIs, Feign Clients (Auth + Audit) |
+| **Audit Service** | 8083 | Centralized audit logging — single source of truth for application auditing |
+
+**Core principles:**
+- One database per service — services never share or cross-query each other's databases
+- Only Auth Service generates JWT tokens — every other service validates independently using a shared signing secret
+- Services communicate via REST APIs (OpenFeign), not shared databases or shared entities
+- Services locate each other by logical name through Eureka — no hardcoded URLs anywhere
+- Clients communicate with ONE endpoint — the Gateway routes everything
+- **Each business capability lives in its own bounded context — audit logging is not a medical concern** (Day 4)
+
+Each service has:
+- ✅ Independent Spring Boot application
+- ✅ Independent Maven project
+- ✅ Independent PostgreSQL database (business services)
+- ✅ Independent Deployment
+- ✅ Clear ownership of its business domain
+- ✅ Registered with Eureka Service Registry
+
+---
+
+## 🌐 gateway-service
+
+Status: ✅ **Complete** — routing all client traffic.
+
+### What it does
+- **Single public entry point** — clients only ever call port 8080
+- Routes requests to downstream services by **URL pattern**
+- Resolves targets dynamically via **Eureka + LoadBalancer** (`lb://` URIs)
+- Foundation for future gateway-level JWT validation, centralized CORS, and rate limiting
+
+### Project Setup
+
+```
+Group        : com.medinfo
+Artifact     : gateway-service
+Java         : 21
+Spring Boot  : 3.5.x
+```
+
+**Dependencies:**
+- Reactive Gateway (Spring Cloud Gateway — built on WebFlux)
+- Eureka Discovery Client
+- Spring Cloud BOM (`2025.0.0`) for version alignment
+
+### Configuration
+
+```properties
+spring.application.name=gateway-service
+server.port=8080
+
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
+eureka.instance.prefer-ip-address=true
+
+# --- Routes ---
+# Auth
+spring.cloud.gateway.server.webflux.routes[0].id=auth-service
+spring.cloud.gateway.server.webflux.routes[0].uri=lb://AUTH-SERVICE
+spring.cloud.gateway.server.webflux.routes[0].predicates[0]=Path=/api/auth/**,/api/users/**
+
+# Medical
+spring.cloud.gateway.server.webflux.routes[1].id=medical-service
+spring.cloud.gateway.server.webflux.routes[1].uri=lb://MEDICAL-SERVICE
+spring.cloud.gateway.server.webflux.routes[1].predicates[0]=Path=/api/medical/**,/api/contacts/**,/api/emergency/**
+```
+
+### Route Table
+
+| Path Predicates | Target |
 |---|---|
-| Language | Java 17 |
-| Framework | Spring Boot 3.5 |
-| Security | Spring Security + JWT (JJWT) |
-| Database | PostgreSQL via Neon (cloud) |
-| ORM | Spring Data JPA + Hibernate |
-| Build | Maven |
-| Utilities | Lombok, DevTools |
+| `/api/auth/**`, `/api/users/**` | `lb://AUTH-SERVICE` |
+| `/api/medical/**`, `/api/contacts/**`, `/api/emergency/**` | `lb://MEDICAL-SERVICE` |
+
+> 💡 The `lb://` prefix tells Spring Cloud Gateway to use the LoadBalancer + Eureka to discover the destination dynamically — no hardcoded hosts or ports.
+
+> ℹ️ The Audit Service has no Gateway route — it is an **internal service** that only receives traffic from other backend services via Feign.
+
+### ⚠️ Real Issue Hit — UnknownHostException
+
+Gateway requests initially failed because Eureka registered services under the machine's **corporate hostname** (`HSC-XXXX.allegisgroup.com`), which couldn't be resolved locally. Fix: set `eureka.instance.prefer-ip-address=true` on every service so Eureka registers IP addresses instead of hostnames.
 
 ---
 
-## 📂 Project Structure
+## 🧭 eureka-server
 
+Status: ✅ **Complete** — all four services registered.
+
+### What it does
+- Central **Service Registry** — every microservice registers itself at startup
+- Stores service name, host, port, status, and health information
+- Receives periodic **heartbeats** from registered services
+- Answers discovery queries: *"Where is AUTH-SERVICE?"* → current address
+- Dashboard at `http://localhost:8761` — shows `AUTH-SERVICE`, `MEDICAL-SERVICE`, `AUDIT-SERVICE`, `GATEWAY-SERVICE` all UP
+
+### Setup
+
+```java
+@EnableEurekaServer
+@SpringBootApplication
+public class EurekaServerApplication {
+}
 ```
-com.MedInfo
-├── config          # SecurityFilterChain, PasswordEncoder bean
-├── controller      # AuthController, MedicalProfileController,
-│                   # EmergencyContactsController, EmergencyController
-├── dto             # RegisterRequestDTO, LoginRequestDTO,
-│                   # CreateMedicalProfileDTO, MedicalProfileResponseDTO,
-│                   # CreateEContactDTO, EContactsDTO,
-│                   # EmergencyProfileResponseDTO
-├── entity          # User, MedicalProfile, EmergencyContacts, EmergencyAccessLog
-├── enums           # AccessMethod
-├── exception       # GlobalExceptionHandler
-├── repository      # UserRepository, MedicalProfileRepository,
-│                   # EmergencyContactsRepository, EmergencyAccessLogRepository
-├── security        # JWTService, JWTAuthenticationFilter,
-│                   # CustomUserDetailsService
-├── service         # AuthService, MedicalProfileService,
-│                   # EmergencyContactsService, EmergencyService,
-│                   # EmergencyAccessLogService
-└── util            # ApiResponse wrapper
+
+**Dependencies:**
+- Spring Cloud Netflix Eureka Server
+
+### Configuration
+
+```properties
+spring.application.name=eureka-server
+server.port=8761
+
+# The server itself is not a client
+eureka.client.register-with-eureka=false
+eureka.client.fetch-registry=false
 ```
+
+> ℹ️ **Self Preservation Mode:** In local development the dashboard may show an "EMERGENCY!" warning. This is expected — Eureka avoids evicting instances when heartbeat traffic is low. In production with many services this disappears automatically.
 
 ---
 
-## 📌 APIs
+## 🔐 auth-service
 
-### Auth APIs (Public)
+Status: ✅ **Complete** — fully independent, registered with Eureka, reachable via Gateway.
+
+### Structure
+
+```
+auth-service
+├── config
+│      SecurityConfig.java ✅
+│
+├── controller
+│      AuthController.java ✅
+│      UserController.java ✅
+│
+├── dto
+│      LoginRequestDTO.java ✅
+│      RegisterRequestDTO.java ✅
+│      UserPublicResponseDTO.java ✅
+│
+├── entity
+│      User.java ✅
+│
+├── exception
+│      GlobalExceptionHandler.java ✅
+│      ResourceNotFoundException.java ✅
+│      ResourceAlreadyExistsException.java ✅
+│      UnauthorizedException.java ✅
+│      ServiceUnavailableException.java ✅
+│      ErrorResponse.java ✅
+│
+├── repository
+│      UserRepository.java ✅
+│
+├── security
+│      JWTAuthenticationFilter.java ✅
+│      JWTService.java ✅
+│      CustomUserDetailsService.java ✅
+│
+├── service
+│      AuthService.java ✅
+│
+└── AuthServiceApplication.java ✅
+```
+
+### Responsibilities
+- User registration with UUID-based public profile ID
+- Login with BCrypt password verification
+- JWT generation — includes **custom claims** (`userId`, `role`) so downstream services authenticate without a database lookup
+- JWT validation via `JWTAuthenticationFilter` (runs on every request)
+- `CustomUserDetailsService` — loads user from DB for Spring Security
+- **Public User API** — `GET /api/users/public/{publicProfileId}` returns `userId` + `fullName` for downstream services
+- Centralized exception handling with custom exceptions and `ErrorResponse` model
+- **Eureka Client** — registers as `AUTH-SERVICE` and sends heartbeats
+
+### Project Setup
+
+```
+Project      : Maven
+Language     : Java
+Spring Boot  : 3.5.x
+Java         : 21
+Group        : com.medinfo
+Artifact     : auth-service
+Package      : com.medinfo.auth
+```
+
+**Dependencies:**
+- Spring Web
+- Spring Security
+- Spring Data JPA
+- PostgreSQL Driver
+- Validation
+- Lombok
+- JJWT (`jjwt-api`, `jjwt-impl`, `jjwt-jackson`)
+- Spring Cloud Netflix Eureka Client
+
+### Configuration
+
+```properties
+spring.application.name=auth-service
+
+server.port=8081
+
+spring.datasource.url=jdbc:postgresql://<host>/auth_db
+spring.datasource.username=...
+spring.datasource.password=...
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+jwt.secret=...
+jwt.expiration=900000
+
+# Eureka
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
+eureka.instance.prefer-ip-address=true
+```
+
+⚠️ Never commit real credentials to Git. Use environment variables in production.
+
+### APIs (via Gateway — port 8080)
 
 **Register User**
 ```
 POST /api/auth/register
 ```
-Request:
 ```json
 {
   "fullName": "Narendra Kumar",
@@ -137,20 +301,11 @@ Request:
   "password": "password123"
 }
 ```
-Response:
-```json
-{
-  "success": true,
-  "message": "User registered successfully",
-  "data": null
-}
-```
 
 **Login User**
 ```
 POST /api/auth/login
 ```
-Request:
 ```json
 {
   "email": "narendra@gmail.com",
@@ -166,466 +321,368 @@ Response:
 }
 ```
 
-### Medical Profile APIs (JWT Protected)
-
-All requests require: `Authorization: Bearer <jwt_token>`
-
-**Create Medical Profile**
-```
-POST /api/profile
-```
-Request:
+JWT payload contains custom claims:
 ```json
 {
-  "age": 24,
-  "gender": "Male",
-  "bloodGroup": "O+",
-  "height": 175.0,
-  "weight": 70.0,
-  "allergies": "Dust Allergy",
-  "medicalConditions": "Hypertension",
-  "currentMedications": "Telma H, Met XL",
-  "organDonor": true
+  "sub": "admin@gmail.com",
+  "userId": 1,
+  "role": "USER"
 }
+```
+
+**Get Public User by Profile ID** *(inter-service use)*
+```
+GET /api/users/public/{publicProfileId}
+Authorization: Bearer <jwt_token>
 ```
 Response:
 ```json
 {
-  "success": true,
-  "message": "Medical Profile Created Successfully",
-  "data": null
-}
-```
-
-**Get Medical Profile**
-```
-GET /api/profile
-```
-Response:
-```json
-{
-  "success": true,
-  "message": "Profile fetched",
-  "data": {
-    "age": 24,
-    "gender": "Male",
-    "bloodGroup": "O+",
-    "height": 175.0,
-    "weight": 70.0,
-    "allergies": "Dust Allergy",
-    "medicalConditions": "Hypertension",
-    "currentMedications": "Telma H, Met XL",
-    "organDonor": true
-  }
-}
-```
-
-**Update Medical Profile**
-```
-PUT /api/profile
-```
-Request: Same structure as Create — send updated fields.
-
-Response:
-```json
-{
-  "success": true,
-  "message": "Profile Updated Successfully",
-  "data": null
-}
-```
-
-**Delete Medical Profile**
-```
-DELETE /api/profile
-```
-Response:
-```json
-{
-  "success": true,
-  "message": "Profile Deleted Successfully",
-  "data": null
-}
-```
-
-### Emergency Contacts APIs (JWT Protected)
-
-All requests require: `Authorization: Bearer <jwt_token>`
-
-**Create Emergency Contact**
-```
-POST /api/contacts
-```
-Request:
-```json
-{
-  "name": "Venkateshwarlu",
-  "relationship": "Father",
-  "phoneNumber": "9999999999"
-}
-```
-Response:
-```json
-{
-  "success": true,
-  "message": "Emergency Contact Added Successfully",
-  "data": null
-}
-```
-
-**Get All Emergency Contacts**
-```
-GET /api/contacts
-```
-Response:
-```json
-{
-  "success": true,
-  "message": "Contacts fetched",
-  "data": [
-    {
-      "id": 1,
-      "name": "Venkateshwarlu",
-      "relationship": "Father",
-      "phoneNumber": "9999999999"
-    },
-    {
-      "id": 2,
-      "name": "Lakshmi",
-      "relationship": "Mother",
-      "phoneNumber": "8888888888"
-    }
-  ]
-}
-```
-
-**Update Emergency Contact**
-```
-PUT /api/contacts/{id}
-```
-Example: `PUT /api/contacts/1`
-
-Request:
-```json
-{
-  "name": "Venkateshwarlu",
-  "relationship": "Father",
-  "phoneNumber": "7777777777"
-}
-```
-Response:
-```json
-{
-  "success": true,
-  "message": "Contact Updated Successfully",
-  "data": null
-}
-```
-
-**Delete Emergency Contact**
-```
-DELETE /api/contacts/{id}
-```
-Example: `DELETE /api/contacts/1`
-
-Response:
-```json
-{
-  "success": true,
-  "message": "Contact Deleted Successfully",
-  "data": null
-}
-```
-
-### Public Emergency API (No Login Required)
-
-**Get Emergency Profile by UUID**
-```
-GET /api/emergency/{publicProfileId}
-```
-Example: `GET /api/emergency/550e8400-e29b-41d4-a716-446655440000`
-
-No Authorization header needed. Designed for emergency responders. **Every successful call to this endpoint is now recorded in the audit log** (IP address, user agent, timestamp, access method).
-
-Response:
-```json
-{
-  "fullName": "Narendra Kumar",
-  "age": 24,
-  "gender": "Male",
-  "bloodGroup": "O+",
-  "allergies": "Dust Allergy",
-  "medicalConditions": "Hypertension",
-  "currentMedications": "Telma H, Met XL",
-  "organDonor": true,
-  "emergencyContacts": [
-    {
-      "id": 1,
-      "name": "Venkateshwarlu",
-      "relationship": "Father",
-      "phoneNumber": "9999999999"
-    }
-  ]
+  "userId": 1,
+  "fullName": "Narendra Kumar"
 }
 ```
 
 ---
 
-## 🔑 JWT Flow
+## 🩺 medical-service
+
+Status: ✅ **Complete** — pure medical domain, audit logging delegated to Audit Service.
+
+### Structure
 
 ```
-POST /api/auth/login
-        ↓
-Find user by email → BCrypt verify password
-        ↓
-Generate JWT (email + iat + exp embedded)
-        ↓
-Return token to client
-
---- On every subsequent request ---
-
-Authorization: Bearer <token>
-        ↓
-JWTAuthenticationFilter intercepts
-        ↓
-Extract token → Extract email → Load user from DB
-        ↓
-Validate token (email match + not expired)
-        ↓
-Store in SecurityContextHolder → Request proceeds
-        ↓
-Service calls SecurityContextHolder.getContext()
-        .getAuthentication().getName() → gets current user email
+medical-service
+├── client
+│      AuthClient.java ✅
+│      AuditClient.java ✅             ← New (Day 4)
+│
+├── config
+│      SecurityConfig.java ✅
+│      FeignConfig.java ✅
+│
+├── controller
+│      EmergencyController.java ✅
+│      EmergencyContactsController.java ✅
+│      MedicalProfileController.java ✅
+│
+├── dto
+│      CreateMedicalProfileDTO.java ✅
+│      MedicalProfileResponseDTO.java ✅
+│      EmergencyProfileResponseDTO.java ✅
+│      EContactsDTO.java ✅
+│      UserPublicResponseDTO.java ✅
+│      CreateAuditLogRequestDTO.java ✅  ← New (Day 4)
+│
+├── entity
+│      MedicalProfile.java ✅
+│      EmergencyContacts.java ✅
+│      (EmergencyAccessLog — REMOVED, moved to audit-service) ← Day 4
+│
+├── exception
+│      GlobalExceptionHandler.java ✅
+│      ResourceNotFoundException.java ✅
+│      ResourceAlreadyExistsException.java ✅
+│      UnauthorizedException.java ✅
+│      ServiceUnavailableException.java ✅
+│      CustomFeignErrorDecoder.java ✅
+│      ErrorResponse.java ✅
+│
+├── repository
+│      MedicalProfileRepository.java ✅
+│      EmergencyContactsRepository.java ✅
+│      (EmergencyAccessLogRepository — REMOVED) ← Day 4
+│
+├── security
+│      JWTAuthenticationFilter.java ✅
+│      JWTService.java ✅
+│
+├── service
+│      MedicalProfileService.java ✅
+│      EmergencyContactsService.java ✅
+│      EmergencyService.java ✅
+│      (EmergencyAccessLogService — REMOVED) ← Day 4
+│
+└── MedicalServiceApplication.java ✅
 ```
 
----
+### Responsibilities
+- Medical Profile CRUD
+- Emergency Contacts CRUD
+- Public Emergency Profile API — resolves `publicProfileId` → `userId` via OpenFeign call to Auth Service
+- **Audit delegation** — sends `CreateAuditLogRequestDTO` to Audit Service via `AuditClient` on every emergency access (Day 4)
+- **JWT validation only** — does not generate tokens, uses the same signing secret as Auth Service
+- **No direct access to other services' databases** — `userId` references + Feign calls only
+- **Two OpenFeign clients** — `AuthClient` (user resolution) and `AuditClient` (audit logging), both resolved by name through Eureka
+- **Centralized exception framework** with custom exceptions, `ErrorResponse`, and `CustomFeignErrorDecoder`
+- **Eureka Client** — registers as `MEDICAL-SERVICE`
 
-## 🆘 Emergency Access Flow (with Audit Logging)
-
-```
-User Registers
-        ↓
-UUID generated automatically (publicProfileId)
-        ↓
-User creates Medical Profile + Emergency Contacts
-        ↓
-Public URL: GET /api/emergency/{uuid}
-        ↓
-Future: QR Code generated from this URL
-        ↓
-Emergency Responder scans QR
-        ↓
-EmergencyService finds user → logs access (EmergencyAccessLogService)
-        ↓
-Medical data returned instantly — no login needed
-```
-
----
-
-## 🏗️ Data Architecture
+### Project Setup
 
 ```
-User
- │
- ├── publicProfileId (UUID — for public emergency access)
- │
- ├── MedicalProfile    (1:1)  @OneToOne
- │    └── age, gender, blood group, height, weight,
- │        allergies, conditions, medications, organDonor
- │
- ├── EmergencyContacts (1:N)  @ManyToOne
- │    └── name, relationship, phoneNumber
- │
- └── EmergencyAccessLog (1:N)  @ManyToOne
-      └── accessTime, ipAddress, userAgent, accessMethod
+Project      : Maven
+Language     : Java
+Spring Boot  : 3.5.x
+Java         : 21
+Group        : com.medinfo
+Artifact     : medical-service
+Package      : com.medinfo.medical
 ```
 
----
+**Dependencies:**
+- Spring Web
+- Spring Security
+- Spring Data JPA
+- PostgreSQL Driver
+- Validation
+- Lombok
+- Spring Cloud OpenFeign (`spring-cloud-starter-openfeign`)
+- Spring Cloud Netflix Eureka Client
 
-## 🔒 Security Architecture
+**Database:** `medical_db` · **Port:** `8082`
 
-```
-/api/auth/**        → Public (register, login)
-/api/emergency/**   → Public (UUID-based, no login) — now audited
-Everything else     → JWT Required
-```
+### Configuration
 
----
-
-## ⚙️ Configuration
-
-`application.properties`:
 ```properties
-# PostgreSQL — Neon
-spring.datasource.url=jdbc:postgresql://<neon-host>/neondb?sslmode=require
-spring.datasource.username=<username>
-spring.datasource.password=<password>
-spring.datasource.driver-class-name=org.postgresql.Driver
+spring.application.name=medical-service
 
-# JPA
-spring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect
+server.port=8082
+
+spring.datasource.url=jdbc:postgresql://<host>/medical_db
+spring.datasource.username=...
+spring.datasource.password=...
+
 spring.jpa.hibernate.ddl-auto=update
 spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
 
-# JWT
-jwt.secret=<your-secret-key>
+# Same signing secret as auth-service — required for JWT signature verification
+jwt.secret=...
 jwt.expiration=900000
 
-# Server
-server.port=8080
+# Eureka
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
+eureka.instance.prefer-ip-address=true
 ```
-⚠️ Never commit real credentials to Git. Use environment variables in production.
+
+### OpenFeign Clients
+
+```java
+@FeignClient(name = "auth-service")   // resolves publicProfileId → userId
+@FeignClient(name = "audit-service")  // persists audit logs (Day 4)
+```
+
+No URLs — both resolved by logical name through Eureka. If either service changes host, container, or port, Eureka provides the updated address — **no code changes, no redeployment of consumers**.
+
+### Emergency Profile Flow (Gateway + Eureka + 2 Feign calls)
+
+```
+Client
+↓
+API Gateway (8080) → route match /api/emergency/**
+↓
+Eureka → MEDICAL-SERVICE
+↓
+Medical Service
+↓
+AuthClient (OpenFeign) → Eureka → AUTH-SERVICE
+↓
+UserPublicResponseDTO { userId, fullName }
+↓
+Medical Service → MedicalProfileRepository → EmergencyContactsRepository
+↓
+AuditClient (OpenFeign) → Eureka → AUDIT-SERVICE → audit_db   ← Day 4
+↓
+EmergencyProfileResponseDTO
+↓
+Client
+```
+
+Medical Service touches only `medical_db` — user data comes from Auth Service, audit records go to Audit Service.
+
+### Key Architectural Changes
+
+**Domain Model — replaced JPA User relationship with userId:**
+```java
+// Before (Monolith)
+@ManyToOne
+@JoinColumn(name = "user_id")
+private User user;
+
+// After (Microservices)
+@Column(nullable = false)
+private Long userId;
+```
+
+**JWT Authentication — no database lookup:**
+```
+JWT → Validate Signature → Extract userId → SecurityContextHolder
+```
+
+**Audit Ownership — extracted to Audit Service (Day 4):**
+```
+// Before (Day 3)
+Emergency Profile Viewed → EmergencyAccessLogService → medical_db
+
+// After (Day 4)
+Emergency Profile Viewed → AuditClient (Feign) → Audit Service → audit_db
+```
+`EmergencyAccessLog` entity, repository, and service **removed** from medical-service entirely.
+
+**Exception Handling — custom exceptions + Feign Error Decoder:**
+
+| HTTP Status | Exception |
+|---|---|
+| 404 | ResourceNotFoundException |
+| 401 | UnauthorizedException |
+| 409 | ResourceAlreadyExistsException |
+| 503 | ServiceUnavailableException |
+| 500 | Generic handler |
 
 ---
 
-## ✅ Current State
+## 🧾 audit-service
 
-- ✅ Spring Boot Backend
-- ✅ JWT Authentication
-- ✅ PostgreSQL
-- ✅ CRUD APIs
-- ✅ Security
-- ✅ Global Exception Handling
-- ✅ Public Emergency Access (UUID-based)
-- ✅ Emergency Access Audit Logging
+Status: ✅ **Complete** — fourth microservice, single source of truth for auditing. *(New — Day 4)*
 
-## ✅ Completed Milestones
+### What it does
+- Receives audit events from other backend services via REST
+- Persists every emergency profile access: who, from where, with what client, how, and when
+- Designed **generically** (`AuditLog`, not `EmergencyAccessLog`) so future events — user login, profile updates, contact modifications, password changes — land in the same service
+- **Internal-only service**: no Spring Security, no Gateway route — receives requests only from other backend services
 
-- [x] Project Setup
-- [x] PostgreSQL via Neon (cloud database)
-- [x] Spring Security Setup
-- [x] User Entity with publicProfileId (UUID)
-- [x] User Repository
-- [x] Registration API — UUID auto-generated
-- [x] Login API
-- [x] Password Encryption (BCrypt)
-- [x] DTO Validation (`@NotBlank`, `@Email`, `@Size`, `@Positive`, `@Pattern`)
-- [x] Global Exception Handling
-- [x] JWT Dependencies (JJWT)
-- [x] JWTService — generate, validate, extract claims
-- [x] CustomUserDetailsService
-- [x] JWTAuthenticationFilter (OncePerRequestFilter)
-- [x] SecurityFilterChain — stateless, JWT-protected routes
-- [x] Protected APIs working end-to-end
-- [x] MedicalProfile Entity (`@OneToOne`) with age and gender
-- [x] MedicalProfile Repository (findByUser, existsByUser)
-- [x] Medical Profile DTOs (Request + Response)
-- [x] Create Medical Profile API — POST /api/profile
-- [x] Get Medical Profile API — GET /api/profile
-- [x] Update Medical Profile API — PUT /api/profile
-- [x] Delete Medical Profile API — DELETE /api/profile
-- [x] SecurityContextHolder for current user identification
-- [x] EmergencyContacts Entity (`@ManyToOne` with User)
-- [x] EmergencyContacts Repository (findAllByUser, existsByUser)
-- [x] Emergency Contact DTOs (Request + Response)
-- [x] Create Emergency Contact API — POST /api/contacts
-- [x] Get All Contacts API — GET /api/contacts
-- [x] Update Contact API — PUT /api/contacts/{id}
-- [x] Delete Contact API — DELETE /api/contacts/{id}
-- [x] Ownership validation on update and delete
-- [x] List Entity to List DTO mapping (stream + map + toList)
-- [x] Public Emergency endpoint — GET /api/emergency/{uuid}
-- [x] EmergencyProfileResponseDTO
-- [x] SecurityConfig updated — emergency route public
-- [x] IDOR prevention via UUID
-- [x] EmergencyAccessLog entity (`@ManyToOne` with User)
-- [x] AccessMethod enum (QR, URL)
-- [x] EmergencyAccessLogRepository (findAllByUser)
-- [x] EmergencyAccessLogService — IP, user-agent, timestamp capture
-- [x] EmergencyService updated to log access before returning profile
-- [x] Full CRUD tested in Postman
+### Project Setup
 
----
+```
+Group        : com.medinfo
+Artifact     : audit-service
+Java         : 21
+Spring Boot  : 3.5.x
+```
 
-## 🔜 Roadmap
+**Dependencies:**
+- Spring Web
+- Spring Data JPA
+- Validation
+- PostgreSQL Driver
+- Lombok
+- Eureka Discovery Client
+- Spring Boot Test
 
-### Architecture
-- [ ] Convert Monolith → Microservices
-- [ ] API Gateway
-- [ ] Eureka Service Registry
-- [ ] Spring Cloud Config Server
+> 💡 Spring Security intentionally **not** added — this is an internal microservice.
 
-### Event Driven Architecture
-- [ ] Kafka Producer
-- [ ] Kafka Consumer
-- [ ] Topics
-- [ ] Partitions
-- [ ] Consumer Groups
-- [ ] Retry
-- [ ] Dead Letter Queue
-- [ ] Idempotency
+**Database:** `audit_db` · **Port:** `8083`
 
-**Use Cases:**
-- User Registration Notification
-- Emergency Access Notification
+### Configuration
 
-### Caching
-- [ ] Redis
-- [ ] `@Cacheable`
-- [ ] `@CacheEvict`
-- [ ] `@CachePut`
-- [ ] TTL
-- [ ] Cache Aside Pattern
+```properties
+spring.application.name=audit-service
+server.port=8083
 
-### DevOps
-- [ ] Docker
-- [ ] Docker Compose
-- [ ] CI/CD Pipeline
-- [ ] GitHub Actions / Jenkins
-- [ ] Environment Variables
-- [ ] Profiles
+eureka.client.service-url.defaultZone=http://localhost:8761/eureka
+eureka.client.register-with-eureka=true
+eureka.client.fetch-registry=true
+eureka.instance.prefer-ip-address=true
+```
 
-### API Quality
-- [ ] Swagger / OpenAPI
-- [ ] Logging (SLF4J)
-- [ ] Actuator
-- [ ] Monitoring Basics
-- [ ] Unit Testing (JUnit + Mockito)
+### Domain — AuditLog
 
-### Frontend (Low Priority)
-Simple React App. Only:
-- Login
-- Dashboard
-- Medical Profile
-- Emergency Contacts
-- QR Code
+| Field | Purpose |
+|---|---|
+| id | Primary key |
+| userId | Which user's data was accessed |
+| ipAddress | Where the request came from |
+| userAgent | What client made the request |
+| accessMethod | `URL` or `QR_CODE` (enum) |
+| accessedAt | Auto-generated via `@CreationTimestamp` |
 
-Nothing fancy.
+### API
+
+**Log an audit event** *(called by other services via Feign)*
+```
+POST /api/audit/log
+```
+```json
+{
+  "userId": 1,
+  "ipAddress": "127.0.0.1",
+  "userAgent": "Mozilla/5.0",
+  "accessMethod": "URL"
+}
+```
+
+Flow: `AuditController` → `AuditService` → DTO converted to `AuditLog` entity → `audit_db`.
 
 ---
 
-## 🧠 Learning Objectives
+## 🧠 Principles Learned
 
-This project is being built to strengthen practical knowledge of:
+- **Migrating to microservices is not just moving Java classes.** Each service needs its own source code, dependencies, configuration, database, security setup, and `pom.xml`.
+- **Migrate bottom-up:** DTO → Entity → Repository → Service → Controller → Security → Exception. This order minimizes compilation errors.
+- **Cross-service JPA relationships are impossible.** Replace with a plain `userId` reference — never duplicate entities, never cross-query databases.
+- **Shared JWT secret enables decentralized authentication.** Every service verifies tokens independently — no token-introspection call to Auth Service.
+- **Custom JWT claims avoid unnecessary database calls.** `userId` and `role` embedded in the token mean downstream services can authenticate with zero DB lookups.
+- **Each service owns its data. Others access it through APIs, never through the database.**
+- **Feign Error Decoder only handles HTTP responses.** Connection failures produce a `RetryableException`, not an HTTP response — handle both separately. Long-term solution: Resilience4j Circuit Breakers.
+- **Hardcoded service URLs don't survive real environments.** Service Discovery lets consumers resolve providers by logical name, with zero code changes when locations change.
+- **Service Discovery solves service-to-service coupling; the API Gateway solves client-to-service coupling.** Eureka frees services from knowing each other's addresses, the Gateway frees clients from knowing any service's address.
+- **Eureka may register hostnames your network can't resolve.** Corporate machine hostnames caused `UnknownHostException` at the Gateway — `eureka.instance.prefer-ip-address=true` forces IP registration.
+- **A capability that isn't part of your domain belongs in its own service.** Audit logging worked inside Medical Service but violated bounded context — extraction gave it its own database, its own scaling, and made it reusable for future event types. (Day 4)
+- **Design extracted domains generically.** Renaming `EmergencyAccessLog` → `AuditLog` turned a single-purpose table into a platform capability that can absorb login events, profile updates, and password changes without redesign. (Day 4)
+- **Internal services don't automatically need Spring Security.** The Audit Service receives traffic only from backend services — deliberate omission, not oversight. (Day 4)
 
-- Spring Boot + Auto Configuration
-- Spring Security + JWT (Stateless)
-- REST API Development
-- JPA & Hibernate (`@OneToOne`, `@ManyToOne`, custom queries)
-- DTO Pattern — Request and Response separation
-- Builder Pattern (Lombok `@Builder`)
-- Repository Pattern (Spring Data JPA)
-- SecurityContextHolder
-- Ownership Validation (IDOR prevention)
-- UUID for public access security
-- `@PathVariable`, `@RequestBody`, `@Valid`
-- List Entity to List DTO mapping
-- Cloud PostgreSQL (Neon)
-- Audit Logging & Single Responsibility Principle
-- Clean Layered Architecture
-- (Upcoming) Microservices, Kafka, Redis, Docker, CI/CD
+---
+
+## ✅ Progress
+
+- [x] Planned the microservices architecture
+- [x] Designed clear service boundaries
+- [x] Created independent Spring Boot projects per service
+- [x] Configured separate PostgreSQL databases (`auth_db`, `medical_db`, `audit_db`)
+- [x] Migrated the complete Authentication domain
+- [x] Successfully launched auth-service independently
+- [x] Created medical-service with its own independent database
+- [x] Migrated the complete Medical domain
+- [x] Redesigned domain model — replaced JPA `User` relationships with `userId` references
+- [x] Redesigned JWT to include custom claims (`userId`, `role`)
+- [x] Implemented independent JWT validation in Medical Service (shared signing secret)
+- [x] Introduced Public User API in Auth Service
+- [x] Implemented OpenFeign in Medical Service (`AuthClient`)
+- [x] Implemented centralized exception framework (custom exceptions + `ErrorResponse`)
+- [x] Introduced `CustomFeignErrorDecoder` via `FeignConfig`
+- [x] Created Eureka Server (port 8761)
+- [x] Registered all services as Eureka Clients
+- [x] Removed hardcoded Feign URLs — services resolved by logical name via Eureka
+- [x] Created API Gateway with Spring Cloud Gateway (Reactive)
+- [x] Configured dynamic routing with `lb://` URIs and path predicates
+- [x] Routed all client traffic through single entry point (8080)
+- [x] Fixed hostname resolution (`eureka.instance.prefer-ip-address=true`)
+- [x] Created Audit Service with dedicated `audit_db` — Day 4
+- [x] Designed generic `AuditLog` domain (URL / QR_CODE access methods) — Day 4
+- [x] Created Audit REST API (`POST /api/audit/log`) and tested independently — Day 4
+- [x] Implemented `AuditClient` Feign client in Medical Service — Day 4
+- [x] Migrated audit logging from Medical Service to Audit Service — Day 4
+- [x] Removed `EmergencyAccessLog` entity, repository, and service from Medical Service — Day 4
+- [ ] Unit Testing (JUnit 5 & Mockito)
+- [ ] Kafka for asynchronous audit event processing
+- [ ] Redis Caching
+- [ ] Docker & Docker Compose
+- [ ] CI/CD with GitHub Actions
+- [ ] Cloud Deployment
 
 ---
 
 ## 📅 Current Status
 
-**Phase 4 Complete** — Emergency Access Audit Logging module done.
+**Five applications running: API Gateway + Eureka Server + three business microservices** (auth, medical, audit), each with its own database, communicating exclusively through Eureka-resolved Feign calls.
 
 ```
-Registration → Login → JWT → Medical Profile CRUD
-→ Emergency Contacts CRUD → Public Emergency Access
-→ Emergency Access Audit Logging ✅
+Client → Gateway → Eureka → { AUTH, MEDICAL, AUDIT }
+Medical → Feign → Auth   (user resolution)
+Medical → Feign → Audit  (audit logging)
 ```
 
-Next milestone: **Microservices Architecture (API Gateway + Eureka + Config Server)** 🚀
+Bounded contexts are now clean: Medical Service owns only medical data; Audit Service is the single source of truth for auditing.
+
+Next phase: **Production readiness** — Unit Testing (JUnit 5 + Mockito), Kafka for asynchronous audit event processing (replacing the synchronous Feign audit call), Redis Caching, Docker & Docker Compose, CI/CD with GitHub Actions, and Cloud Deployment 🚀

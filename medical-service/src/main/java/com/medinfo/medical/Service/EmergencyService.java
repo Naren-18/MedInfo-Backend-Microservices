@@ -1,27 +1,19 @@
 package com.medinfo.medical.Service;
 
+import com.medinfo.medical.Client.AuditClient;
 import com.medinfo.medical.Client.AuthClient;
-import com.medinfo.medical.DTO.EContactsDTO;
-import com.medinfo.medical.DTO.EmergencyProfileResponseDTO;
-import com.medinfo.medical.DTO.MedicalProfileResponseDTO;
-import com.medinfo.medical.DTO.UserPublicResponseDTO;
-import com.medinfo.medical.Entity.EmergencyAccessLog;
+import com.medinfo.medical.DTO.*;
 import com.medinfo.medical.Entity.EmergencyContacts;
 import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Enum.AccessMethod;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Exception.ServiceUnavailableException;
-import com.medinfo.medical.Repository.EmergencyAccessLogRepository;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
-import feign.FeignException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.AllArgsConstructor;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
@@ -29,8 +21,8 @@ import java.util.List;
 public class EmergencyService {
     private final EmergencyContactsRepository emergencyContactsRepository;
     private final MedicalProfileRepository medicalProfileRepository;
-    private final EmergencyAccessLogService emergencyAccessLogService;
     private final AuthClient authClient;
+    private final AuditClient auditClient;
     public EmergencyProfileResponseDTO getEmergencyProfile(String publicProfileId, HttpServletRequest request){
 
         UserPublicResponseDTO responseDTO;
@@ -44,12 +36,14 @@ public class EmergencyService {
             );
         }
         Long userId=responseDTO.getUserId();
-        emergencyAccessLogService.logAccess(
-                userId,
-                request,
-                AccessMethod.URL
-        );
+        CreateAuditLogRequestDTO createAuditLogRequestDTO=CreateAuditLogRequestDTO.builder()
+                .userId(userId)
+                .ipAddress(request.getRemoteAddr())
+                .userAgent(request.getHeader("User-Agent"))
+                .accessMethod(AccessMethod.URL)
+                .build();
 
+        auditClient.createAuditLog(createAuditLogRequestDTO);
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
                 .orElseThrow(()->new ResourceNotFoundException(
                         "Medical Profile",

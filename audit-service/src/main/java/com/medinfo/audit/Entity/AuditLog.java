@@ -1,6 +1,6 @@
-package com.medinfo.medical.Entity;
+package com.medinfo.audit.Entity;
 
-import com.medinfo.medical.Enum.AccessMethod;
+import com.medinfo.audit.Enum.AccessMethod;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -9,23 +9,23 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
-@Getter
+@Table(name = "audit_logs")
 @Setter
+@Getter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class EmergencyAccessLog {
-
+public class AuditLog {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    @CreationTimestamp
-    private LocalDateTime accessTime;
+    @Column(nullable = false)
+    private Long userId;
     private String ipAddress;
     private String userAgent;
     @Enumerated(EnumType.STRING)
-    private AccessMethod accessMethod;
-
     @Column(nullable = false)
-    private Long userId;
+    private AccessMethod accessMethod;
+    @CreationTimestamp
+    private LocalDateTime accessedAt;
 }
