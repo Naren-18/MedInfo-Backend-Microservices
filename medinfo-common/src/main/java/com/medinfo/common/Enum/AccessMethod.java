@@ -1,4 +1,4 @@
-package com.medinfo.medical.Enum;
+package com.medinfo.common.Enum;
 
 public enum AccessMethod {
 

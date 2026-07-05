@@ -1,4 +1,4 @@
-package com.medinfo;
+package com.medinfo.common;
 
 /**
  * Hello world!

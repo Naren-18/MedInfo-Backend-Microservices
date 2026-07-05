@@ -1,6 +1,6 @@
 package com.medinfo.audit.DTO;
 
-import com.medinfo.audit.Enum.AccessMethod;
+import com.medinfo.common.Enum.AccessMethod;
 import lombok.*;
 
 @Getter

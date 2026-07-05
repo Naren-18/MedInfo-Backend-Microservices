@@ -5,7 +5,7 @@ import com.medinfo.medical.Client.AuthClient;
 import com.medinfo.medical.DTO.*;
 import com.medinfo.medical.Entity.EmergencyContacts;
 import com.medinfo.medical.Entity.MedicalProfile;
-import com.medinfo.medical.Enum.AccessMethod;
+import com.medinfo.common.Enum.AccessMethod;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Exception.ServiceUnavailableException;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;

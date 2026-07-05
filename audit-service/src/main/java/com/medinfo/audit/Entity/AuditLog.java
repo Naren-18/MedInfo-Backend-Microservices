@@ -1,6 +1,6 @@
 package com.medinfo.audit.Entity;
 
-import com.medinfo.audit.Enum.AccessMethod;
+import com.medinfo.common.Enum.AccessMethod;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
