@@ -1,8 +1,8 @@
 package com.medinfo.audit.Service;
 
-import com.medinfo.audit.DTO.CreateAuditLogRequestDTO;
 import com.medinfo.audit.Entity.AuditLog;
 import com.medinfo.audit.Repository.AuditRepository;
+import com.medinfo.common.events.AuditLogEvent;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -11,13 +11,13 @@ import org.springframework.stereotype.Service;
 public class AuditService {
     private final AuditRepository auditRepository;
 
-    public AuditLog createAuditLog(CreateAuditLogRequestDTO createAuditLogRequestDTO){
+    public AuditLog createAuditLog(AuditLogEvent auditLogEvent){
 
         AuditLog auditLog=AuditLog.builder()
-                .ipAddress(createAuditLogRequestDTO.getIpAddress())
-                .userAgent(createAuditLogRequestDTO.getUserAgent())
-                .userId(createAuditLogRequestDTO.getUserId())
-                .accessMethod(createAuditLogRequestDTO.getAccessMethod())
+                .ipAddress(auditLogEvent.getIpAddress())
+                .userAgent(auditLogEvent.getUserAgent())
+                .userId(auditLogEvent.getUserId())
+                .accessMethod(auditLogEvent.getAccessMethod())
                 .build();
         return auditRepository.save(auditLog);
 

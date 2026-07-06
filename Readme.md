@@ -61,6 +61,7 @@ Java 21 · Spring Boot 3.5 · Spring Cloud (Gateway, Eureka, OpenFeign) · Sprin
 - **No cross-service JPA relationships** — `@ManyToOne User` became `Long userId`. The owning service is reached via API, never via its database.
 - **Sync vs async by one question:** does the response depend on the result? User resolution → Feign. Audit logging → Kafka.
 - **Events are the contract, not Java classes** — producer and consumer each own their event class copy; only the JSON shape is shared.
+- **Reliable by design, not by luck** — bounded retry (3× with backoff) → Dead Letter Topic for poison messages, and idempotent consumption (unique `eventId` + DB constraint) since Kafka is at-least-once and duplicates are normal.
 - **Bounded contexts** — audit logging was extracted from the Medical Service into its own service with its own database, evolving from local persistence → Feign call → Kafka event.
 - **Business logic unit tested in isolation** — mocked repositories, mocked Feign clients, mocked SecurityContext. No DB, no HTTP, no Spring context. JaCoCo coverage on all three business services.
 
@@ -123,7 +124,8 @@ All APIs via the Gateway: `http://localhost:8080/api/...` — Postman collection
 - [x] Spring Cloud Gateway — single entry point
 - [x] Audit Service extraction (bounded context)
 - [x] Unit testing (JUnit 5 + Mockito) + JaCoCo coverage
-- [ ] Event-driven audit logging with Kafka — synchronous Feign path removed
+- [x] Event-driven audit logging with Kafka — synchronous Feign path removed
+- [x] Kafka reliability — retry with backoff, Dead Letter Topic, idempotent consumer
 - [ ] Redis caching
 - [ ] Docker & Docker Compose
 - [ ] CI/CD with GitHub Actions

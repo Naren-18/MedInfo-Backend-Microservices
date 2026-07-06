@@ -1,8 +1,6 @@
 package com.medinfo.medical.Service;
 
-import com.medinfo.medical.Client.AuditClient;
 import com.medinfo.medical.Client.AuthClient;
-import com.medinfo.medical.DTO.CreateAuditLogRequestDTO;
 import com.medinfo.medical.DTO.EmergencyProfileResponseDTO;
 import com.medinfo.medical.DTO.UserPublicResponseDTO;
 import com.medinfo.medical.Entity.EmergencyContacts;
@@ -27,7 +25,6 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)

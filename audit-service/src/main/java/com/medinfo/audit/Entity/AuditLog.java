@@ -1,11 +1,10 @@
 package com.medinfo.audit.Entity;
 
-import com.medinfo.common.Enum.AccessMethod;
+import com.medinfo.common.enums.AccessMethod;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity

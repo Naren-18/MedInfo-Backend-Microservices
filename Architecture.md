@@ -15,6 +15,7 @@ MedInfo-Backend-Microservices
 ├── auth-service        # Authentication & user identity
 ├── medical-service     # Medical profiles, contacts, emergency access
 ├── audit-service       # Centralized audit logging (pure Kafka consumer)
+├── medinfo-common      # Shared contracts and common classes
 ├── postman
 └── README.md
 ```
@@ -24,6 +25,14 @@ MedInfo-Backend-Microservices
 - Simpler GitHub management
 - Easier CI/CD during learning
 - Common industry approach for medium-sized projects
+
+### Shared Module
+
+```
+medinfo-common
+    events
+        AuditLogEvent.java
+```
 
 ---
 
@@ -37,26 +46,35 @@ MedInfo-Backend-Microservices
                               │
                        Eureka Discovery
                               │
-        ┌──────────────┬──────────────┐
-        ▼              ▼
-   AUTH SERVICE   MEDICAL SERVICE      AUDIT SERVICE
-     (8081)          (8082)              (8083)
-        ▲              │  │                 ▲
-        └────Feign─────┘  │                 │
-                          │  Kafka topic    │
-                          └─► emergency- ───┘
-                             access-events
-                          (localhost:9092)
+        ┌──────────────┬──────────────┬──────────────┐
+        ▼              ▼              ▼
+   AUTH SERVICE   MEDICAL SERVICE   AUDIT SERVICE
+     (8081)          (8082)            (8083)
+        ▲               │                 ▲
+        │               │                 │
+        └────Feign──────┘                 │
+            (User Lookup)                 │
+                                          │
+                              AuditLogEvent
+                                          │
+                                          ▼
+                                  Apache Kafka
+                             emergency-access-events
+                                  (localhost:9092)
+                                          │
+                                          ▼
+                                 AuditEventConsumer
+                                          │
+                                          ▼
+                                      audit_db
 
-   auth_db         medical_db          audit_db
+     auth_db          medical_db         audit_db
 ```
-
-**Two communication styles, each where it belongs:**
 
 | Interaction | Style | Why |
 |---|---|---|
-| Medical → Auth (resolve user) | Synchronous Feign | The response NEEDS the userId — can't proceed without it |
-| Medical → Audit (log access) | Asynchronous Kafka | The response doesn't depend on the audit — fire and forget |
+| Medical → Auth | OpenFeign | Medical Service requires the userId before continuing |
+| Medical → Audit | Kafka | Audit logging is asynchronous and should never block the client response |
 
 **Gateway Request Lifecycle:**
 ```
@@ -69,7 +87,7 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 | **API Gateway** | 8080 | Single public entry point, dynamic routing, Eureka-integrated load balancing |
 | **Eureka Server** | 8761 | Service Registry, Heartbeats, Dashboard |
 | **Auth Service** | 8081 | User, Login, Registration, JWT Generation, Spring Security, Public User API |
-| **Medical Service** | 8082 | Medical Profile, Emergency Contacts, Emergency Profile APIs, AuthClient (Feign), Kafka Producer |
+| **Medical Service** | 8082 | Medical Profile, Emergency Contacts, Emergency Profile APIs, OpenFeign user resolution, Kafka Producer |
 | **Audit Service** | 8083 | Centralized audit logging — pure Kafka consumer, no REST API |
 
 **Core principles:**
@@ -80,7 +98,12 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 - Clients communicate with ONE endpoint — the Gateway routes everything
 - Each business capability lives in its own bounded context — audit logging is not a medical concern
 - Business logic is unit tested in isolation — no database, no HTTP, no Spring context
-- **Events are the contract, not Java classes — each service owns its own event class copy** (Day 5)
+- Shared event contracts simplify communication between services.
+- AuditLogEvent lives inside medinfo-common and is shared between producer and consumer.
+- Kafka enables asynchronous communication, reducing service coupling and improving system resilience.
+- Producer publishes events without knowing which services consume them.
+- Consumers independently process events from Kafka topics.
+- Consumer Groups and Offsets ensure reliable message consumption.
 
 Each service has:
 - ✅ Independent Spring Boot application
@@ -91,132 +114,349 @@ Each service has:
 - ✅ Registered with Eureka Service Registry
 - ✅ JUnit 5 + Mockito unit test suite with JaCoCo coverage (business services)
 
+
 ---
 
 ## ⚡ Event-Driven Architecture — Kafka (Day 5)
 
-### Why the Feign audit call had to go
+### Why Kafka?
 
-The Day 4 design was synchronous:
+Until now, the Medical Service communicated with the Audit Service using OpenFeign.
+
 ```
-Medical Service → Feign (HTTP) → Audit Service → audit_db
+Medical Service
+      │
+      ▼
+AuditClient
+      │
+      ▼
+Audit Service
+      │
+      ▼
+audit_db
 ```
+
+Although this implementation worked, it introduced several architectural limitations.
 
 | Problem | Explanation |
 |---|---|
-| Tight runtime coupling | Medical Service couldn't complete a request if Audit Service was down |
-| Blocking behavior | Audit persistence delayed the emergency profile response |
-| No buffering | Traffic spikes hit the Audit Service directly |
-| Poor extensibility | A new consumer (notifications, analytics) would require modifying Medical Service |
+| Tight Coupling | Medical Service depended on Audit Service availability |
+| Blocking | Emergency Profile API waited until audit logging completed |
+| Scalability | Every request generated another synchronous HTTP request |
+| Availability | Audit Service downtime directly affected Medical Service |
 
-**Key realization:** audit logging is not part of the emergency profile business transaction — the client's response should never depend on whether an audit row was written.
+Audit logging is not part of the primary business transaction.
+The Emergency Profile API should return immediately regardless of whether audit logging succeeds.
+Kafka provides asynchronous communication, making it a much better fit.
 
-### The event
+### Event Driven Architecture
 
-**`EmergencyAccessedEvent`** — published by Medical Service:
+Instead of directly calling Audit Service, Medical Service now publishes an event.
 
-| Field | Purpose |
-|---|---|
-| userId | Whose profile was accessed |
-| ipAddress | Where the request came from |
-| userAgent | What client made the request |
-| accessMethod | URL or QR_CODE |
-| accessedAt | When the access happened — **carried in the event**, so the audit record reflects true access time even if consumed later |
-
-### Kafka setup (local, KRaft mode — no ZooKeeper)
-
-```bash
-bin/kafka-storage.sh random-uuid
-bin/kafka-storage.sh format -t <uuid> -c config/kraft/server.properties
-bin/kafka-server-start.sh config/kraft/server.properties
+```
+Medical Service
+      │
+      ▼
+AuditLogEvent
+      │
+      ▼
+Kafka Topic
+      │
+      ▼
+Audit Service
 ```
 
-Broker at `localhost:9092`. Topic:
+Medical Service no longer knows where Audit Service is running.
+It simply publishes an event and continues processing.
 
-```bash
-bin/kafka-topics.sh --create \
-  --topic emergency-access-events \
-  --bootstrap-server localhost:9092 \
-  --partitions 3 \
-  --replication-factor 1
-```
+### Kafka Infrastructure
 
-### Producer — medical-service
+Kafka was introduced using Docker Compose.
 
-```properties
-spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
-spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
-```
+**Components:**
+- Apache Kafka Broker
+- Kafka UI
+
+**Ports:**
+- Kafka Broker — `localhost:9092`
+- Kafka UI — `localhost:8084`
+
+Kafka UI allows monitoring:
+- Brokers
+- Topics
+- Messages
+- Consumer Groups
+
+### Kafka Broker
+
+**Development environment:**
+- 1 Broker
+
+A broker is a Kafka server responsible for storing topics and messages.
+One broker is sufficient for local development.
+Production environments typically run multiple brokers for replication and fault tolerance.
+
+### Kafka Topic
+
+Created:
+- `emergency-access-events`
+
+Topic creation is handled automatically by Spring Boot.
+
+Created:
+- `KafkaTopicConfig`
 
 ```java
-kafkaTemplate.send("emergency-access-events", event.getUserId().toString(), event);
-```
-
-> 💡 **userId as the message key** → same user always lands in the same partition → per-user event ordering guaranteed.
-
-### Consumer — audit-service
-
-```properties
-spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.consumer.group-id=audit-service-group
-spring.kafka.consumer.auto-offset-reset=earliest
-spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
-spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.JsonDeserializer
-spring.kafka.consumer.properties.spring.json.trusted.packages=com.medinfo.audit.event
-spring.kafka.consumer.properties.spring.json.value.default.type=com.medinfo.audit.event.EmergencyAccessedEvent
-spring.kafka.consumer.properties.spring.json.use.type.headers=false
-```
-
-```java
-@KafkaListener(
-    topics = "emergency-access-events",
-    groupId = "audit-service-group"
-)
-public void consumeEmergencyAccessEvent(EmergencyAccessedEvent event) {
-    auditService.saveAuditLog(event);
+@Bean
+public NewTopic auditEventsTopic() {
+    return TopicBuilder
+            .name(KafkaTopics.AUDIT_EVENTS)
+            .partitions(1)
+            .replicas(1)
+            .build();
 }
 ```
 
-### ⚠️ Real Issue Hit — Trusted Packages
+**Topic configuration:**
+- Partitions: 1
+- Replicas: 1
 
-Deserialization initially failed:
+### Shared Event Contract
+
+Instead of HTTP DTOs, Kafka exchanges events.
+
+Created inside:
+- `medinfo-common`
+
+`AuditLogEvent`
+
+**Fields:**
+- `userId`
+- `ipAddress`
+- `userAgent`
+- `accessMethod`
+
+Both Medical Service and Audit Service use the same shared contract.
+
 ```
-The class 'com.medinfo.medical.event.EmergencyAccessedEvent'
-is not in the trusted packages
+Medical Service
+
+AuditLogEvent
+
+Kafka
+
+AuditLogEvent
+
+Audit Service
 ```
 
-The JSON deserializer embeds the **producer's** class name in message headers — and the Audit Service doesn't (and shouldn't) have the Medical Service's package on its classpath.
+### Kafka Producer
 
-**Fix:** Audit Service defines its **own copy** of the event class in `com.medinfo.audit.event`, trusts that package, maps the default type, and ignores type headers.
+Medical Service now contains:
+- `KafkaProducerConfig`
 
-> 💡 This is not duplication — it's the event-driven equivalent of the DTO principle. Sharing a class library would recouple the services at the binary level. **The JSON contract is what's shared, not the Java class.**
+Configured:
+- `ProducerFactory`
+- `KafkaTemplate`
+- `JsonSerializer`
 
-### What was removed
+Created:
+- `AuditEventProducer`
 
-| From | Removed |
-|---|---|
-| medical-service | `AuditClient` (Feign interface) |
-| audit-service | `POST /api/audit/log` endpoint, `AuditController`, `CreateAuditLogRequestDTO` |
+Method:
+- `publishAuditEvent(AuditLogEvent event)`
 
-The Audit Service now has **no REST API at all** — it is a pure event consumer.
+**Flow:**
 
-### Before / After
+```
+EmergencyService
 
-| | Day 4 (Synchronous) | Day 5 (Event-Driven) |
-|---|---|---|
-| Communication | Feign HTTP call | Kafka event |
-| Coupling | Medical waits for Audit | Fire and forget |
-| Audit Service down? | Emergency response fails/degrades | Events buffer in Kafka, consumed on recovery |
-| Adding a consumer | Modify Medical Service | Subscribe to the topic — zero producer changes |
-| Audit Service API | REST endpoint | None — pure consumer |
+↓
 
-### Verified end-to-end
+AuditEventProducer
 
-1. Emergency profile returned **immediately** — no audit wait
-2. Kafka console consumer showed the JSON event on the topic
-3. `audit_db` contained the `AuditLog` row with the original access timestamp
-4. **Failure test:** stopped Audit Service → emergency response still succeeded → restarted → buffered event consumed and persisted
+↓
+
+KafkaTemplate
+
+↓
+
+Kafka
+```
+
+### Updating Emergency Service
+
+Previous implementation:
+
+```
+EmergencyService
+
+↓
+
+AuditClient
+```
+
+Current implementation:
+
+```
+EmergencyService
+
+↓
+
+AuditEventProducer
+
+↓
+
+Kafka
+```
+
+Medical Service no longer performs synchronous audit logging.
+
+### Serialization
+
+Producer automatically converts:
+
+```
+AuditLogEvent
+
+↓
+
+JSON
+
+↓
+
+Kafka
+```
+
+using `JsonSerializer`.
+
+### Kafka Consumer
+
+Audit Service now contains:
+- `KafkaConsumerConfig`
+
+Configured:
+- `ConsumerFactory`
+- `JsonDeserializer`
+- Consumer Group
+- Listener Container
+
+Trusted packages were configured for safe JSON deserialization.
+
+### Consumer Groups
+
+**Consumer Group:**
+- `audit-group`
+
+Kafka tracks offsets for every consumer group.
+
+Example:
+
+```
+Offset 0
+
+↓
+
+Consumed
+
+↓
+
+Offset becomes 1
+```
+
+If Audit Service restarts:
+- Resume from Offset 1
+
+Previously processed messages are not consumed again.
+
+### Kafka Listener
+
+Created:
+- `AuditEventConsumer`
+
+```java
+@KafkaListener(
+        topics = KafkaTopics.AUDIT_EVENTS,
+        groupId = "audit-group"
+)
+```
+
+**Responsibilities:**
+- Consume `AuditLogEvent`
+- Delegate to `AuditService`
+
+No business logic exists inside the listener.
+
+### Persisting Events
+
+`AuditService` receives:
+- `AuditLogEvent`
+
+Converts:
+
+```
+AuditLogEvent
+
+↓
+
+AuditLog Entity
+
+↓
+
+AuditRepository
+
+↓
+
+audit_db
+```
+
+Audit Service remains the sole owner of audit persistence.
+
+### Removing Feign
+
+After verifying Kafka communication:
+
+Removed from Medical Service:
+- `AuditClient`
+- `CreateAuditLogRequestDTO`
+
+Removed from Audit Service:
+- `AuditController`
+- `CreateAuditLogRequestDTO`
+
+Audit Service is now a pure Kafka consumer.
+
+### Final Event Flow
+
+```
+Client
+    │
+    ▼
+Medical Service
+    │
+EmergencyService
+    │
+    ▼
+AuditEventProducer
+    │
+    ▼
+Kafka Broker
+    │
+    ▼
+emergency-access-events
+    │
+    ▼
+AuditEventConsumer
+    │
+    ▼
+AuditService
+    │
+    ▼
+audit_db
+```
+
+Medical Service is now completely independent of Audit Service.
+
 
 ---
 
@@ -303,7 +543,6 @@ Mock Authentication → Mock SecurityContext → SecurityContextHolder → Servi
 
 **EmergencyServiceTest** — the service talks to multiple microservices; dependencies mocked:
 - Authentication Service (Feign)
-- Audit Service (Feign — now Kafka producer post-Day 5)
 - Medical Repository
 - Emergency Contact Repository
 
@@ -317,7 +556,6 @@ Scenarios:
 Feign communication completely mocked — service-to-service interactions tested **without real HTTP requests**:
 ```
 Medical Service → Mock Auth Client  → User DTO
-Medical Service → Mock Audit Client → Success Response
 ```
 
 ### audit-service Tests
@@ -634,8 +872,7 @@ Status: ✅ **Complete** — pure medical domain, audit via Kafka events, unit t
 medical-service
 ├── client
 │      AuthClient.java ✅
-│      (AuditClient — REMOVED, replaced by Kafka producer) ← Day 5
-│
+│      │
 ├── config
 │      SecurityConfig.java ✅
 │      FeignConfig.java ✅
@@ -651,11 +888,7 @@ medical-service
 │      EmergencyProfileResponseDTO.java ✅
 │      EContactsDTO.java ✅
 │      UserPublicResponseDTO.java ✅
-│      (CreateAuditLogRequestDTO — REMOVED) ← Day 5
-│
-├── event
-│      EmergencyAccessedEvent.java ✅        ← New (Day 5)
-│
+│      │
 ├── entity
 │      MedicalProfile.java ✅
 │      EmergencyContacts.java ✅
@@ -694,7 +927,7 @@ medical-service
 - Medical Profile CRUD
 - Emergency Contacts CRUD
 - Public Emergency Profile API — resolves `publicProfileId` → `userId` via OpenFeign call to Auth Service
-- **Kafka producer** — publishes `EmergencyAccessedEvent` to `emergency-access-events` on every emergency access, keyed by userId (Day 5)
+- **Kafka producer** — publishes `AuditLogEvent` to `emergency-access-events` on every emergency access, keyed by userId (Day 5)
 - **JWT validation only** — does not generate tokens, uses the same signing secret as Auth Service
 - **No direct access to other services' databases** — `userId` references + Feign/events only
 - **One OpenFeign client** — `AuthClient` (user resolution), resolved by name through Eureka
@@ -811,9 +1044,6 @@ JWT → Validate Signature → Extract userId → SecurityContextHolder
 // Day 3: local persistence
 Emergency Profile Viewed → EmergencyAccessLogService → medical_db
 
-// Day 4: synchronous inter-service call
-Emergency Profile Viewed → AuditClient (Feign) → Audit Service → audit_db
-
 // Day 5: asynchronous event
 Emergency Profile Viewed → KafkaTemplate → emergency-access-events → Audit Service → audit_db
 ```
@@ -837,7 +1067,7 @@ Emergency Profile Viewed → KafkaTemplate → emergency-access-events → Audit
 Status: ✅ **Complete** — pure Kafka consumer, single source of truth for auditing, unit tested.
 
 ### What it does
-- **Consumes `EmergencyAccessedEvent`** from the `emergency-access-events` topic (consumer group: `audit-service-group`) — Day 5
+- **Consumes `AuditLogEvent`** from the `emergency-access-events` topic (consumer group: `audit-service-group`) — Day 5
 - Persists every emergency profile access: who, from where, with what client, how, and when (true access time from the event)
 - Designed **generically** (`AuditLog`, not `EmergencyAccessLog`) so future events — user login, profile updates, contact modifications, password changes — land in the same service
 - **No REST API at all** — the `POST /api/audit/log` endpoint was removed on Day 5; events are the only entry point
@@ -880,13 +1110,11 @@ eureka.instance.prefer-ip-address=true
 
 # Kafka Consumer (Day 5)
 spring.kafka.bootstrap-servers=localhost:9092
-spring.kafka.consumer.group-id=audit-service-group
+spring.kafka.consumer.group-id=audit-group
 spring.kafka.consumer.auto-offset-reset=earliest
 spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
 spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.JsonDeserializer
-spring.kafka.consumer.properties.spring.json.trusted.packages=com.medinfo.audit.event
-spring.kafka.consumer.properties.spring.json.value.default.type=com.medinfo.audit.event.EmergencyAccessedEvent
-spring.kafka.consumer.properties.spring.json.use.type.headers=false
+spring.kafka.consumer.properties.spring.json.trusted.packages=com.medinfo.common.events
 ```
 
 ### Domain — AuditLog
@@ -898,23 +1126,41 @@ spring.kafka.consumer.properties.spring.json.use.type.headers=false
 | ipAddress | Where the request came from |
 | userAgent | What client made the request |
 | accessMethod | `URL` or `QR_CODE` (enum) |
-| accessedAt | True access time — **from the event**, not consumption time (Day 5) |
 
 ### Consumer
 
 ```java
 @KafkaListener(
     topics = "emergency-access-events",
-    groupId = "audit-service-group"
+    groupId = "audit-group"
 )
-public void consumeEmergencyAccessEvent(EmergencyAccessedEvent event) {
+public void consume(AuditLogEvent event) {
     auditService.saveAuditLog(event);
 }
 ```
 
-Flow: Kafka topic → `@KafkaListener` → `AuditService` → `AuditLog` entity → `audit_db`.
+Flow:
 
-> ⚠️ **Real issue hit — trusted packages:** the JSON deserializer embeds the producer's class name in headers; Audit Service defines its own event class copy and ignores type headers. The JSON contract is shared, not the Java class.
+```
+Kafka Topic
+
+↓
+
+AuditEventConsumer
+
+↓
+
+AuditService
+
+↓
+
+AuditRepository
+
+↓
+
+audit_db
+```
+
 
 ---
 
@@ -938,10 +1184,12 @@ Flow: Kafka topic → `@KafkaListener` → `AuditService` → `AuditLog` entity 
 - **`@Value` fields need reflection in plain unit tests.** Spring's property injection doesn't run without a Spring context.
 - **Coverage reports show what you *haven't* tested.** JaCoCo turns "I think it's tested" into "I know what's missing."
 - **Sync vs async is decided by one question: does the response depend on the result?** User resolution → yes → Feign. Audit logging → no → Kafka. (Day 5)
-- **Events carry their own truth.** The access timestamp travels inside the event, so late consumption doesn't corrupt the audit record. (Day 5)
-- **The message key controls ordering.** userId as key → same partition → per-user ordering guaranteed. (Day 5)
-- **Event classes are per-service copies; the JSON contract is what's shared.** Sharing a class library between producer and consumer recouples them at the binary level. (Day 5)
-- **Kafka is a buffer, not just a pipe.** Consumer down → events wait → consumer recovers → catches up from its offset. The failure test proved it. (Day 5)
+- Shared event contracts simplify communication between services.
+- AuditLogEvent lives inside medinfo-common and is shared between producer and consumer.
+- Kafka enables asynchronous communication, reducing service coupling and improving system resilience.
+- Producer publishes events without knowing which services consume them.
+- Consumers independently process events from Kafka topics.
+- Consumer Groups and Offsets ensure reliable message consumption.
 
 ---
 
@@ -971,24 +1219,30 @@ Flow: Kafka topic → `@KafkaListener` → `AuditService` → `AuditLog` entity 
 - [x] Fixed hostname resolution (`eureka.instance.prefer-ip-address=true`)
 - [x] Created Audit Service with dedicated `audit_db`
 - [x] Designed generic `AuditLog` domain (URL / QR_CODE access methods)
-- [x] Created Audit REST API and tested independently
-- [x] Implemented `AuditClient` Feign client in Medical Service
 - [x] Migrated audit logging from Medical Service to Audit Service
 - [x] Removed `EmergencyAccessLog` entity, repository, and service from Medical Service
 - [x] JUnit 5 + Mockito unit tests across all three business services
 - [x] Mocked SecurityContextHolder, mocked Feign clients, `@Value` via reflection
 - [x] Success and failure scenarios tested across all services
 - [x] JaCoCo integrated with HTML coverage reports
-- [x] Learned Kafka fundamentals (topics, partitions, consumer groups, offsets) — Day 5
-- [x] Installed and ran Kafka locally in KRaft mode (no ZooKeeper) — Day 5
-- [x] Created `emergency-access-events` topic (3 partitions) — Day 5
-- [x] Designed `EmergencyAccessedEvent` carrying the true access timestamp — Day 5
-- [x] Implemented Kafka producer in Medical Service (KafkaTemplate, JSON serializer, userId key) — Day 5
-- [x] Implemented Kafka consumer in Audit Service (@KafkaListener, audit-service-group) — Day 5
-- [x] Resolved trusted-packages deserialization issue (per-service event class) — Day 5
-- [x] Removed `AuditClient` Feign interface from Medical Service — Day 5
-- [x] Removed REST endpoint and DTO from Audit Service — pure consumer now — Day 5
-- [x] Verified end-to-end event flow and offline-consumer recovery — Day 5
+- [x] Installed Apache Kafka using Docker Compose
+- [x] Configured Kafka UI
+- [x] Created KafkaTopicConfig
+- [x] Created emergency-access-events topic
+- [x] Introduced AuditLogEvent shared contract
+- [x] Added Kafka Producer configuration
+- [x] Added Kafka Consumer configuration
+- [x] Implemented AuditEventProducer
+- [x] Implemented AuditEventConsumer
+- [x] Configured JsonSerializer
+- [x] Configured JsonDeserializer
+- [x] Configured Consumer Groups
+- [x] Learned Kafka Offsets
+- [x] Successfully migrated Audit communication from Feign to Kafka
+- [x] Removed AuditClient
+- [x] Removed AuditController
+- [x] Removed CreateAuditLogRequestDTO
+- [x] Verified end-to-end asynchronous event flow
 - [ ] Redis Caching (Day 6)
 - [ ] Docker & Docker Compose
 - [ ] CI/CD with GitHub Actions
@@ -1008,6 +1262,6 @@ Medical → Kafka → emergency-access-events → Audit   (asynchronous — fire
 mvn clean test → JaCoCo HTML report per service
 ```
 
-The failure test proved the decoupling: Audit Service down → emergency response unaffected → events buffered in Kafka → consumed on recovery.
+The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked. Duplicate delivery → exactly one audit record (idempotent consumer).
 
 Next milestone: **Day 6 — Redis Caching** — Spring Cache abstraction (`@Cacheable`, `@CacheEvict`, `@CachePut`), caching the emergency profile response, cache invalidation on updates, TTL strategy, and the cache-aside pattern 🚀
