@@ -1,4 +1,4 @@
-package com.medinfo.audit.Entity;
+package com.medinfo.audit.entity;
 
 import com.medinfo.common.enums.AccessMethod;
 import jakarta.persistence.*;
@@ -6,6 +6,7 @@ import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Entity
 @Table(name = "audit_logs")
@@ -27,4 +28,6 @@ public class AuditLog {
     private AccessMethod accessMethod;
     @CreationTimestamp
     private LocalDateTime accessedAt;
+    @Column(nullable = false, unique = true)
+    private UUID eventId;
 }

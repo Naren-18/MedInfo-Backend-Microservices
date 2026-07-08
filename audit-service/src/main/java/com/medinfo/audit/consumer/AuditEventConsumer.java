@@ -1,6 +1,6 @@
 package com.medinfo.audit.consumer;
 
-import com.medinfo.audit.Service.AuditService;
+import com.medinfo.audit.service.AuditService;
 import com.medinfo.common.constants.KafkaTopics;
 import com.medinfo.common.events.AuditLogEvent;
 import lombok.RequiredArgsConstructor;

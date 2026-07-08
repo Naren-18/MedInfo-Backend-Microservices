@@ -3,6 +3,8 @@ package com.medinfo.common.events;
 import com.medinfo.common.enums.AccessMethod;
 import lombok.*;
 
+import java.util.UUID;
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -18,4 +20,6 @@ public class AuditLogEvent {
     private String userAgent;
 
     private AccessMethod accessMethod;
+
+    private UUID eventId;
 }

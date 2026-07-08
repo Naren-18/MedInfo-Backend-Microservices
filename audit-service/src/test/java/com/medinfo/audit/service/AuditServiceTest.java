@@ -1,10 +1,10 @@
-package com.medinfo.audit.Service;
+package com.medinfo.audit.service;
 
 
 import com.medinfo.audit.DTO.CreateAuditLogRequestDTO;
-import com.medinfo.audit.Entity.AuditLog;
+import com.medinfo.audit.entity.AuditLog;
 import com.medinfo.audit.Enum.AccessMethod;
-import com.medinfo.audit.Repository.AuditRepository;
+import com.medinfo.audit.repository.AuditRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;

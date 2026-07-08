@@ -31,8 +31,10 @@ MedInfo-Backend-Microservices
 ```
 medinfo-common
     events
-        AuditLogEvent.java
+        AuditLogEvent.java   (userId, ipAddress, userAgent, accessMethod, accessedAt, eventId)
 ```
+
+> `eventId` (UUID) was added to `AuditLogEvent` to support idempotent consumption in `audit-service` — see **🛡️ Kafka Reliability**.
 
 ---
 
@@ -63,8 +65,10 @@ medinfo-common
                                   (localhost:9092)
                                           │
                                           ▼
-                                 AuditEventConsumer
-                                          │
+                                 AuditEventConsumer ──(3 retries)──► DeadLetterPublishingRecoverer
+                                          │                                      │
+                                  existsByEventId()                             ▼
+                                          │                        emergency-access-events.DLT
                                           ▼
                                       audit_db
 
@@ -457,6 +461,222 @@ audit_db
 
 Medical Service is now completely independent of Audit Service.
 
+---
+
+## 🛡️ Kafka Reliability — Retry, Dead Letter Topic & Idempotent Consumer
+
+### Why This Was Needed
+
+The happy path worked, but one question remained: **what happens when Audit Service receives an event it cannot process?**
+
+Examples: database temporarily unavailable, network interruption, unexpected exception in consumer logic, malformed event payload ("poison message").
+
+Simply consuming Kafka messages is not sufficient for production. Without additional handling:
+
+```
+Event fails
+    │
+    ▼
+Retry immediately
+    │
+    ▼
+Fail again
+    │
+    ▼
+Retry forever (blocking the partition)
+```
+
+A single bad event can block every event behind it in the same partition. Kafka is also **at-least-once** by default — a consumer crash before the offset commits means the same event is redelivered, which would create **duplicate audit rows** without protection.
+
+Three reliability mechanisms were added to `audit-service`: **bounded retry**, a **Dead Letter Topic**, and an **idempotent consumer**.
+
+### 1. Consumer Retry — `DefaultErrorHandler` + `FixedBackOff`
+
+```java
+@Bean
+public DefaultErrorHandler errorHandler(DeadLetterPublishingRecoverer recoverer) {
+    FixedBackOff backOff = new FixedBackOff(1000L, 3L); // 1s interval, 3 retries
+    return new DefaultErrorHandler(recoverer, backOff);
+}
+```
+
+Registered on the listener container factory:
+
+```java
+ConcurrentKafkaListenerContainerFactory<String, AuditLogEvent> factory = ...;
+factory.setCommonErrorHandler(errorHandler);
+```
+
+**Retry flow:**
+
+```
+Receive Event → Listener Exception → Retry #1 → Retry #2 → Retry #3 → Retries Exhausted
+```
+
+Tested by temporarily throwing `new RuntimeException("Testing Kafka Retry")` inside the consumer. Logs confirmed: record retried, offset repositioned, backoff applied, retry attempts exhausted before moving on.
+
+### 2. Dead Letter Topic (DLT)
+
+After retries are exhausted, the event is no longer discarded — it's preserved for investigation and replay.
+
+```
+Retry Failed
+    │
+    ▼
+Dead Letter Topic
+    │
+    ▼
+Future Investigation → Possible Replay
+```
+
+**Topic ownership moved from Medical Service to Audit Service.** Audit Service owns event consumption, retry handling, and dead-letter processing — so topic management belongs there too. `KafkaTopicConfig` (now inside `audit-service`) creates both topics automatically on startup:
+
+```java
+@Bean
+public NewTopic auditEventsTopic() {
+    return TopicBuilder.name(KafkaTopics.AUDIT_EVENTS).partitions(1).replicas(1).build();
+}
+
+@Bean
+public NewTopic auditEventsDLT() {
+    return TopicBuilder.name(KafkaTopics.AUDIT_EVENTS_DLT).partitions(1).replicas(1).build();
+}
+```
+
+```
+KafkaTopics.AUDIT_EVENTS      = emergency-access-events
+KafkaTopics.AUDIT_EVENTS_DLT  = emergency-access-events.DLT
+```
+
+**Audit Service becomes a producer too.** Publishing to a DLT requires producer capability, so a `KafkaProducerConfig` (`ProducerFactory` + `KafkaTemplate`) was added inside Audit Service — used internally by `DeadLetterPublishingRecoverer` to publish failed messages, not by application code directly.
+
+**`DeadLetterPublishingRecoverer`:**
+
+```
+Failed Event → Determine Destination Topic → Publish Failed Record → Dead Letter Topic
+```
+
+Configured to publish to `emergency-access-events.DLT` while **preserving the original partition**, keeping partition consistency between the source topic and the DLT.
+
+**Updated error handling flow:**
+
+```
+// Before
+DefaultErrorHandler → Retry → Stop (message discarded)
+
+// After
+DefaultErrorHandler → Retry → DeadLetterPublishingRecoverer → DLT
+```
+
+**Verified:** with an intentional exception left in place, Kafka UI confirmed the failed event landed in `emergency-access-events.DLT` — **while the client still received a successful HTTP response.** This is the core payoff of asynchronous communication: audit logging failures never touch the client's request lifecycle (contrast with the old synchronous Feign path, where `Medical Service → Audit Service → Failure → HTTP 500` would have broken the client response directly).
+
+### 3. Idempotent Consumer
+
+Kafka's at-least-once delivery means the same event can be redelivered:
+
+```
+Event Saved → Consumer Crash → Offset Not Committed → Kafka Redelivers Event
+```
+
+Without protection, this produces duplicate audit rows.
+
+**Event identity — `eventId` added to `AuditLogEvent`** (shared contract in `medinfo-common`):
+
+```java
+public class AuditLogEvent {
+    private UUID eventId;   // ← new
+    private Long userId;
+    private String ipAddress;
+    private String userAgent;
+    private AccessMethod accessMethod;
+    private Instant accessedAt;
+}
+```
+
+Generated in Medical Service before publishing:
+
+```java
+AuditLogEvent event = AuditLogEvent.builder()
+        .eventId(UUID.randomUUID())
+        .userId(userId)
+        // ...
+        .build();
+```
+
+Every produced event now has a permanent, globally unique identity.
+
+**Persistence — `AuditLog` entity enhanced with `eventId`:**
+
+```java
+@Column(nullable = false, unique = true)
+private UUID eventId;
+```
+
+Database-level `UNIQUE` + `NOT NULL` constraint guarantees duplicates cannot create duplicate rows even under a race.
+
+**Repository:**
+
+```java
+boolean existsByEventId(UUID eventId);
+```
+
+**Idempotent processing flow:**
+
+```
+Receive Event → existsByEventId()
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+   Already Exists          Not Found
+        │                       │
+        ▼                       ▼
+   Ignore Event            Save Audit Log
+```
+
+**Tested** by temporarily hardcoding a fixed UUID in the producer and publishing the same event twice. First delivery: not found → saved. Second delivery: already exists → ignored. Logs confirmed `Duplicate event ignored: 11111111-1111-1111-1111-111111111111`; database verification showed **one event → one row**.
+
+### Final Kafka Reliability Architecture
+
+```
+Medical Service → Kafka Producer → emergency-access-events
+                                          │
+                                          ▼
+                                   Audit Consumer
+                                          │
+                                  existsByEventId()
+                             ┌────────────┴────────────┐
+                             ▼                          ▼
+                            No                          Yes
+                             │                           │
+                             ▼                           ▼
+                       Save Audit Log              Ignore Event
+                             │
+                        Exception?
+                             │
+                             ▼
+                   Retry (3 attempts, 1s backoff)
+                             │
+                        Still Fails?
+                             │
+                             ▼
+                DeadLetterPublishingRecoverer
+                             │
+                             ▼
+                  emergency-access-events.DLT
+```
+
+### Before / After
+
+| Before Reliability | After Reliability |
+|---|---|
+| Kafka Producer | + Fixed Retry Strategy (`DefaultErrorHandler` + `FixedBackOff`) |
+| Kafka Consumer | + Dead Letter Topic + `DeadLetterPublishingRecoverer` |
+| Basic Event Processing | + Dedicated Kafka Producer inside Audit Service |
+| | + Idempotent Consumer / Duplicate Event Detection |
+| | + Database-level uniqueness on `eventId` |
+| | + Production-ready failure recovery |
+
+This completes a production-grade Kafka consumer: capable of surviving transient failures, preserving unprocessable events instead of losing them, and safely handling duplicate delivery without corrupting `audit_db`.
 
 ---
 
@@ -1008,6 +1228,8 @@ UserPublicResponseDTO { userId, fullName }
 ↓
 Medical Service → MedicalProfileRepository → EmergencyContactsRepository
 ↓
+event.eventId = UUID.randomUUID()   ← unique identity for idempotent consumption
+↓
 kafkaTemplate.send("emergency-access-events", userId, event)   ← fire and forget (Day 5)
 ↓
 EmergencyProfileResponseDTO returned immediately
@@ -1067,10 +1289,15 @@ Emergency Profile Viewed → KafkaTemplate → emergency-access-events → Audit
 Status: ✅ **Complete** — pure Kafka consumer, single source of truth for auditing, unit tested.
 
 ### What it does
-- **Consumes `AuditLogEvent`** from the `emergency-access-events` topic (consumer group: `audit-service-group`) — Day 5
+- **Consumes `AuditLogEvent`** from the `emergency-access-events` topic (consumer group: `audit-group`)
 - Persists every emergency profile access: who, from where, with what client, how, and when (true access time from the event)
 - Designed **generically** (`AuditLog`, not `EmergencyAccessLog`) so future events — user login, profile updates, contact modifications, password changes — land in the same service
 - **No REST API at all** — the `POST /api/audit/log` endpoint was removed on Day 5; events are the only entry point
+- **Owns both Kafka topics** — `emergency-access-events` and `emergency-access-events.DLT` — created automatically via `KafkaTopicConfig`
+- **Bounded retry** — `DefaultErrorHandler` + `FixedBackOff` (3 attempts, 1s interval) before giving up on a record
+- **Dead Letter Topic** — `DeadLetterPublishingRecoverer` publishes unprocessable events to `emergency-access-events.DLT` instead of discarding them, preserving the original partition
+- **Also a Kafka producer** — a `KafkaProducerConfig` was added solely to support publishing to the DLT
+- **Idempotent consumer** — unique `eventId` (UUID) per event, `UNIQUE` DB constraint, `existsByEventId()` check before every insert, so Kafka's at-least-once redelivery never creates duplicate rows
 - **Internal-only service**: no Spring Security, no Gateway route
 - **Unit tested** — successful audit log creation + repository failure
 
@@ -1090,7 +1317,7 @@ Spring Boot  : 3.5.x
 - PostgreSQL Driver
 - Lombok
 - Eureka Discovery Client
-- Spring Kafka (`spring-kafka`) ← Day 5
+- Spring Kafka (`spring-kafka`) — Day 5 consumer, Day 5-reliability producer (for DLT publishing)
 - Spring Boot Test
 
 > 💡 Spring Security intentionally **not** added — this is an internal microservice.
@@ -1115,6 +1342,10 @@ spring.kafka.consumer.auto-offset-reset=earliest
 spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
 spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.JsonDeserializer
 spring.kafka.consumer.properties.spring.json.trusted.packages=com.medinfo.common.events
+
+# Kafka Producer — reliability only, used by DeadLetterPublishingRecoverer
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
 ```
 
 ### Domain — AuditLog
@@ -1122,6 +1353,7 @@ spring.kafka.consumer.properties.spring.json.trusted.packages=com.medinfo.common
 | Field | Purpose |
 |---|---|
 | id | Primary key |
+| eventId | Globally unique event UUID — `UNIQUE, NOT NULL` — enables idempotent consumption |
 | userId | Which user's data was accessed |
 | ipAddress | Where the request came from |
 | userAgent | What client made the request |
@@ -1139,6 +1371,18 @@ public void consume(AuditLogEvent event) {
 }
 ```
 
+`AuditService.saveAuditLog()` performs the idempotency check before persisting:
+
+```java
+public void saveAuditLog(AuditLogEvent event) {
+    if (auditRepository.existsByEventId(event.getEventId())) {
+        log.info("Duplicate event ignored: {}", event.getEventId());
+        return;
+    }
+    auditRepository.save(toEntity(event));
+}
+```
+
 Flow:
 
 ```
@@ -1150,9 +1394,9 @@ AuditEventConsumer
 
 ↓
 
-AuditService
+AuditService → existsByEventId()  →  duplicate? → ignore
 
-↓
+↓ (new event)
 
 AuditRepository
 
@@ -1160,6 +1404,8 @@ AuditRepository
 
 audit_db
 ```
+
+> See **🛡️ Kafka Reliability** above for the full retry + Dead Letter Topic + idempotency implementation and testing.
 
 
 ---
@@ -1190,6 +1436,10 @@ audit_db
 - Producer publishes events without knowing which services consume them.
 - Consumers independently process events from Kafka topics.
 - Consumer Groups and Offsets ensure reliable message consumption.
+- **A working consumer isn't a reliable consumer.** Retry, Dead Letter Topic, and idempotency are three separate problems — transient failure, poison messages, and at-least-once redelivery — and need three separate fixes, not one generic try-catch.
+- **The consumer owns retry and dead-letter responsibility, so it owns topic management too.** Moving `KafkaTopicConfig` from Medical Service to Audit Service kept ownership aligned with responsibility.
+- **A Dead Letter Topic needs a producer.** Even a pure-consumer service becomes a producer the moment it needs to publish failed events elsewhere — this doesn't break the "Audit Service has no REST API" principle, since it's an internal Kafka-to-Kafka handoff, not a client-facing endpoint.
+- **Kafka's at-least-once delivery is a guarantee, not an edge case.** Idempotency (`eventId` + unique constraint + `existsByEventId()`) has to be designed in from the start, not bolted on after a duplicate-row bug in production.
 
 ---
 
@@ -1243,6 +1493,17 @@ audit_db
 - [x] Removed AuditController
 - [x] Removed CreateAuditLogRequestDTO
 - [x] Verified end-to-end asynchronous event flow
+- [x] Configured `DefaultErrorHandler` with `FixedBackOff` (3 attempts, 1s interval)
+- [x] Tested bounded retry with an intentional consumer exception
+- [x] Moved Kafka topic configuration from Medical Service to Audit Service
+- [x] Created Dead Letter Topic (`emergency-access-events.DLT`)
+- [x] Added Kafka producer capability to Audit Service (for DLT publishing)
+- [x] Configured `DeadLetterPublishingRecoverer` with partition preservation
+- [x] Verified failed events land in the DLT while the client still gets a successful response
+- [x] Added unique `eventId` (UUID) to `AuditLogEvent`
+- [x] Added unique DB constraint on `AuditLog.eventId`
+- [x] Implemented `existsByEventId()` idempotency check
+- [x] Tested duplicate delivery — verified exactly one row per event
 - [ ] Redis Caching (Day 6)
 - [ ] Docker & Docker Compose
 - [ ] CI/CD with GitHub Actions
@@ -1252,16 +1513,18 @@ audit_db
 
 ## 📅 Current Status
 
-**Five applications + Kafka broker running.** The architecture is now genuinely event-driven where it should be, and synchronous where it must be:
+**Five applications + Kafka broker running.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, and reliable where failures are inevitable:
 
 ```
 Client → Gateway → Eureka → { AUTH, MEDICAL }
-Medical → Feign → Auth                      (synchronous — response needs userId)
-Medical → Kafka → emergency-access-events → Audit   (asynchronous — fire and forget)
+Medical → Feign → Auth                                     (synchronous — response needs userId)
+Medical → Kafka → emergency-access-events → Audit           (asynchronous — fire and forget)
+Audit  → Retry (3×) → DeadLetterPublishingRecoverer → emergency-access-events.DLT   (on failure)
+Audit  → existsByEventId() → ignore | save                  (on redelivery)
 
 mvn clean test → JaCoCo HTML report per service
 ```
 
-The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked. Duplicate delivery → exactly one audit record (idempotent consumer).
+The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer).
 
 Next milestone: **Day 6 — Redis Caching** — Spring Cache abstraction (`@Cacheable`, `@CacheEvict`, `@CachePut`), caching the emergency profile response, cache invalidation on updates, TTL strategy, and the cache-aside pattern 🚀

@@ -1,5 +1,12 @@
-package com.medinfo.audit.Config;
+package com.medinfo.audit.config;
 
+import com.medinfo.common.constants.KafkaTopics;
+import lombok.RequiredArgsConstructor;
+import org.apache.kafka.common.TopicPartition;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.util.backoff.FixedBackOff;
 import com.medinfo.common.events.AuditLogEvent;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -11,11 +18,13 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 
 import java.util.HashMap;
-import java.util.Locale;
 import java.util.Map;
 
 @Configuration
+@RequiredArgsConstructor
 public class KafkaConsumerConfig {
+    private final KafkaTemplate<String,AuditLogEvent> kafkaTemplate;
+
 
     @Bean
     public ConsumerFactory<String,AuditLogEvent> consumerFactory(){
@@ -51,9 +60,34 @@ public class KafkaConsumerConfig {
     }
 
     @Bean
+    public DeadLetterPublishingRecoverer deadLetterPublishingRecoverer(){
+        return new DeadLetterPublishingRecoverer(
+                kafkaTemplate,
+                (record,ex)->new TopicPartition(
+                        KafkaTopics.AUDIT_EVENTS_DLT,
+                        record.partition()
+                )
+        );
+    }
+
+    @Bean
+    public DefaultErrorHandler errorHandler() {
+        FixedBackOff fixedBackOff = new FixedBackOff(
+                1000L,   // Wait 1 second
+                3L        // Retry 3 times
+        );
+
+        return new DefaultErrorHandler(
+                deadLetterPublishingRecoverer(),
+                fixedBackOff
+        );
+    }
+
+    @Bean
     public ConcurrentKafkaListenerContainerFactory<String,AuditLogEvent> kafkaListenerContainerFactory(){
         ConcurrentKafkaListenerContainerFactory<String , AuditLogEvent> factory= new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
+        factory.setCommonErrorHandler(errorHandler());
         return factory;
     }
 }

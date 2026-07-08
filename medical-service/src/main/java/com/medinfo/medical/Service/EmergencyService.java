@@ -16,6 +16,7 @@ import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @AllArgsConstructor
@@ -50,6 +51,8 @@ public class EmergencyService {
                 .accessMethod(AccessMethod.URL)
                 .ipAddress(request.getRemoteAddr())
                 .userAgent(request.getHeader("User-Agent"))
+//                .eventId(UUID.randomUUID())
+                .eventId(UUID.fromString("11111111-1111-1111-1111-111111111111"))
                 .build();
         auditEventProducer.publishAuditEvent(event);
         return EmergencyProfileResponseDTO.builder()

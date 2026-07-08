@@ -1,4 +1,4 @@
-package com.medinfo.medical.Config;
+package com.medinfo.audit.config;
 
 import com.medinfo.common.constants.KafkaTopics;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -17,6 +17,14 @@ public class KafkaTopicConfig {
                 .replicas(1)
                 .build();
     }
+    @Bean
+    public NewTopic auditLogDLT() {
+        return TopicBuilder
+                .name(KafkaTopics.AUDIT_EVENTS_DLT)
+                .partitions(1)
+                .replicas(1)
+                .build();
 
+    }
 
 }
