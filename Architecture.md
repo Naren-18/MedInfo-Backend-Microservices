@@ -10,6 +10,7 @@ In a medical emergency, first responders can scan a QR code to instantly access 
 
 ```
 MedInfo-Backend-Microservices
+├── config-server       # Centralized configuration (Spring Cloud Config Server)
 ├── eureka-server       # Service Registry (Netflix Eureka)
 ├── gateway-service     # API Gateway (Spring Cloud Gateway)
 ├── auth-service        # Authentication & user identity
@@ -19,6 +20,8 @@ MedInfo-Backend-Microservices
 ├── postman
 └── README.md
 ```
+
+> Configuration itself now lives outside this repo, in a dedicated `medinfo-config` Git repository — see **⚙️ Config Server** below.
 
 **Why a Monorepo?**
 - Easier local development
@@ -53,11 +56,10 @@ medinfo-common
    AUTH SERVICE   MEDICAL SERVICE   AUDIT SERVICE
      (8081)          (8082)            (8083)
         ▲               │  ▲              ▲
-        │               │  └──Redis (Cache-Aside, localhost:6379)
-        └────Feign──────┘                 │
-       (fullName only —                   │
-        Day 6 redesign)       AuditLogEvent
-                                          │
+        │               │  └──① Redis GET (Cache-Aside, localhost:6379) — checked FIRST
+        └────②Feign─────┘                 │
+       (fullName only —       ③ AuditLogEvent (cache MISS only)
+        cache miss only)                  │
                                           ▼
                                   Apache Kafka
                              emergency-access-events
@@ -73,12 +75,25 @@ medinfo-common
 
      auth_db          medical_db         audit_db          Redis (6379)
 ```
+> Numbers show request order on a cache miss: **① Redis (miss) → Medical DB → ② Feign to Auth → ③ Kafka publish.** On a cache hit, only ① happens.
 
 | Interaction | Style | Why |
 |---|---|---|
-| Medical → Auth | OpenFeign | Resolving `fullName` — the only remaining thing Medical Service doesn't own (Day 6 narrowed this from full user resolution) |
-| Medical → Audit | Kafka | Audit logging is asynchronous and should never block the client response |
-| Medical → Redis | Synchronous, in-process | Not a microservice — a cache, consulted before either of the above (Day 6) |
+| Medical → Redis | Synchronous, in-process | Cache-Aside — always checked first, before Feign or Kafka |
+| Medical → Auth | OpenFeign | Resolving `fullName` — the only remaining thing Medical Service doesn't own (Day 6 narrowed this from full user resolution); only reached on a cache miss |
+| Medical → Audit | Kafka, **cache misses only** | Audit logging is asynchronous and should never block the client response. **Cache hits currently publish no audit event** — see Next Phase in the Day 6 section; don't read this as "every access is audited," it isn't yet. |
+
+**Emergency Profile request, in actual order:**
+```
+QR Scan → Redis GET (emergency-profile::<publicProfileId>)
+   Cache HIT  → Return immediately — no DB, no Feign, no Kafka
+   Cache MISS → MedicalProfileRepository.findByPublicProfileId() (no Auth dependency)
+              → Feign → Auth Service (fullName only)
+              → EmergencyContactsRepository
+              → Kafka → emergency-access-events (fire-and-forget)
+              → cache the response (TTL 10 min) → Return
+```
+Redis is always checked first. Feign to Auth and the Kafka publish both only happen on a cache miss, and only after the Medical DB lookup — not before it.
 
 **Gateway Request Lifecycle:**
 ```
@@ -88,6 +103,7 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 
 | Service | Port | Owns |
 |---|---|---|
+| **Config Server** | 8888 | Centralized configuration, backed by the `medinfo-config` Git repo — every service below fetches its config from here at startup (Day 7) |
 | **API Gateway** | 8080 | Single public entry point, dynamic routing, Eureka-integrated load balancing |
 | **Eureka Server** | 8761 | Service Registry, Heartbeats, Dashboard |
 | **Auth Service** | 8081 | User (id, fullName, email, password), Login, Registration, JWT Generation, Spring Security, minimal internal user-by-id API |
@@ -109,6 +125,7 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 - Consumers independently process events from Kafka topics.
 - Consumer Groups and Offsets ensure reliable message consumption.
 - A cache key belongs to the service that owns the resource it identifies — if a service can't compute or invalidate its own cache key without calling another service, the identifier is owned by the wrong service (Day 6).
+- Configuration is centralized and version-controlled, not duplicated per service — every service fetches its config from Config Server at startup, backed by a dedicated Git repo (Day 7).
 
 Each service has:
 - ✅ Independent Spring Boot application
@@ -816,9 +833,9 @@ EmergencyService → EmergencyProfileCacheService → Redis
 ```
 Update PostgreSQL → Delete Redis Key → Next Request → Cache MISS → Fresh Data
 ```
-Prevents a first responder from ever seeing stale medical information (e.g. an outdated allergy list) — correctness matters more than hit ratio here.
+Prevents a first responder from ever seeing stale medical information (e.g. an outdated allergy list) — correctness matters more than hit ratio here. **Explicit cache eviction is the primary consistency mechanism for this cache** — it's what guarantees a post-update read is fresh, not a side effect of the cache eventually expiring.
 
-**TTL — implemented as a safety net, not the primary invalidation mechanism:**
+**TTL — implemented as a secondary safety net, not the primary invalidation mechanism:**
 ```java
 redisTemplate.opsForValue().set(cacheKey, response, Duration.ofMinutes(10));
 ```
@@ -864,6 +881,8 @@ MedicalProfile medicalProfile = MedicalProfile.builder()
 Column: `unique = true, nullable = false`. New repository method: `findByPublicProfileId(String publicProfileId)`.
 
 **Result:** `MedicalProfileService.updateProfile()` evicts its own cache without asking anyone, and the Emergency API resolves the medical-data portion of the response with **no Feign call, no dependency on Auth Service being up**, just to find its own resource. Strictly better regardless of caching — Redis just made the cost of not fixing it immediate and visible.
+
+**Stated plainly, since it's the entire point of this redesign: Feign is now used for identity data only.** `AuthClient` has exactly one remaining job — resolving `fullName` by `userId`. All medical data (`publicProfileId`, blood group, allergies, medications, contacts) resolves entirely within `medical_db`, with zero dependency on Auth Service being reachable.
 
 ### The `fullName` Question — Why Identity Stays in Auth Service
 
@@ -953,6 +972,152 @@ Cache-Aside Pattern · Single Responsibility Principle · Bounded Context · Sep
 - **Circuit breaker for the Auth Feign call** — replace the manual `try/catch (RetryableException)` with a Resilience4j circuit breaker + fallback.
 - **Backfill migration** — existing `medical_profile` rows created before this migration may have a `NULL publicProfileId`; needs a data migration before this reaches an environment with real data (`ddl-auto=update` can't add the `NOT NULL` constraint until that's resolved).
 - **TTL tuning** — 10 minutes was a starting value; revisit once there's real access-pattern data.
+- **Typed `RedisTemplate`** — currently `RedisTemplate<String, Object>`, with the cast to `EmergencyProfileResponseDTO` happening at the call site in `EmergencyProfileCacheService`. A `RedisTemplate<String, EmergencyProfileResponseDTO>` would remove that cast and be more explicit about what this cache actually stores — discussed, not yet done.
+
+---
+
+## ⚙️ Config Server — Centralized Configuration (Day 7)
+
+### The Problem
+
+Before Config Server, every service carried a full local `application.properties` — database config, Eureka URL, Kafka config, Redis config, JWT secret, server port, logging config — duplicated service to service. Fine at three services; doesn't scale, and every environment (dev/QA/prod) would multiply that duplication further.
+
+**Before:**
+```
+Client → API Gateway → { Auth Service, Medical Service, Audit Service }
+  Each service: application.yml (full local config)
+```
+
+**After:**
+```
+Git Repository (medinfo-config) → Config Server (8888) → { Auth, Medical, Audit, Gateway, Eureka }
+```
+
+### New Microservice: `config-server`
+
+Dependencies: Spring Web, Spring Boot Actuator, Spring Cloud Config Server.
+
+```java
+@SpringBootApplication
+@EnableConfigServer
+public class ConfigServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ConfigServerApplication.class, args);
+    }
+}
+```
+`@EnableConfigServer` converts an ordinary Spring Boot app into a centralized configuration server — everything else about it (dependencies, structure) looks like any other service.
+
+**Config Server's own config:**
+```yaml
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        git:
+          uri: https://github.com/Naren-18/medinfo-config.git
+          default-label: main
+```
+`default-label` pins which Git branch configuration is served from — the hook that would let a `dev` or `prod` branch serve different config later without touching any service.
+
+### The Config Git Repository
+
+A dedicated repo, `medinfo-config`, containing only YAML — no Java code:
+```
+medinfo-config
+├── auth-service.yml
+├── medical-service.yml
+├── audit-service.yml
+├── gateway-service.yml
+└── eureka-server.yml
+```
+Each filename matches the corresponding service's `spring.application.name` exactly — that naming convention is how Config Server knows which file to serve to which caller.
+
+### What Changed Locally in Each Service
+
+**Before** — e.g. Auth Service's local `application.properties` held everything: datasource, JWT, Kafka, Redis, port, Eureka URL.
+
+**After**, each service's local file shrinks to two lines:
+```properties
+spring.application.name=auth-service
+spring.config.import=configserver:http://localhost:8888
+```
+Everything else — datasource, JPA, JWT, Eureka — moved into that service's file in the `medinfo-config` repo. `spring.application.name` is the lookup key; `spring.config.import` is where to look.
+
+**Example — `auth-service.yml` in the config repo:**
+```yaml
+server:
+  port: 8081
+
+spring:
+  datasource:
+    url: jdbc:postgresql://...
+    username: ...
+    password: ...
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+jwt:
+  secret: ...
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+```
+Same shape repeats for `medical-service.yml`, `audit-service.yml`, `gateway-service.yml`, `eureka-server.yml` — each service's config, just relocated.
+
+### Config Loading Flow
+
+```
+Microservice starts → reads local application.properties → spring.application.name = auth-service
+  → calls http://localhost:8888/auth-service/default
+  → Config Server reads auth-service.yml from the Git repo
+  → returns the YAML as the service's configuration
+  → application starts normally, using that config
+```
+Every service follows the identical flow — the `{application-name}/default` URL pattern is Config Server's convention, resolved automatically from `spring.application.name`.
+
+### Startup Order — Now a Hard Dependency
+
+```
+1. Config Server → 2. Eureka Server → 3. Auth Service → 4. Medical Service → 5. Audit Service → 6. API Gateway
+```
+Config Server has to be first and available before anything else, since every other service now depends on it just to read its own port and datasource on startup — a dependency that didn't exist before this change.
+
+### Advantages
+
+| Advantage | Why it matters |
+|---|---|
+| Centralized configuration | Single source of truth instead of N copies |
+| Easier maintenance | Update one YAML file instead of hunting through every service |
+| Environment management | Natural foundation for separate dev/QA/prod config later (Git branches or profile-specific files) |
+| No rebuild required | Configuration changes don't require touching application code |
+| Scalability | Adding a service means adding one config file, not copy-pasting boilerplate |
+
+### Design Principles Applied
+
+Separation of configuration from application code · Single source of truth (Git) · Convention over configuration (`{application-name}/default` lookup) · Explicit startup-order dependency management
+
+### Key Learnings
+
+- Configuration duplication is invisible at 2–3 services and becomes a real maintenance cost as the service count grows — Config Server is the standard fix, not a premature abstraction.
+- Moving config out of each service doesn't remove the dependency, it relocates it: every service now depends on Config Server being up at startup, a new hard ordering constraint that didn't exist before.
+- Naming convention (`{service-name}.yml` matching `spring.application.name`) is what makes the lookup automatic — get that naming wrong and a service silently gets no config, not an error pointing at the mismatch.
+- Git as the config store is a deliberate choice: version history, code review on config changes, and branch-per-environment all come for free from a tool already in the workflow, rather than needing separate config-management tooling.
+
+### Next Phase (Not Yet Done)
+
+- **Config Server high availability** — currently a single instance; a Config Server outage blocks every other service from starting (though already-running services keep running on their last-fetched config).
+- **Encrypted secrets** — JWT secret and DB credentials currently sit in plaintext YAML in the Git repo; Spring Cloud Config supports encryption at rest for exactly this.
+- **Profile-specific config** (`auth-service-dev.yml`, `auth-service-prod.yml`) — the natural next step toward real environment separation, not yet built.
+- **Config refresh without restart** (`/actuator/refresh` + Spring Cloud Bus) — currently a config change still requires restarting the consuming service to pick it up.
 
 ---
 
@@ -1115,6 +1280,8 @@ Spring Boot  : 3.5.x
 
 ### Configuration
 
+> **Day 7:** the block below now lives in `gateway-service.yml` in the `medinfo-config` Git repo. The local `application.properties` shrank to just `spring.application.name=gateway-service` + `spring.config.import=configserver:http://localhost:8888`.
+
 ```properties
 spring.application.name=gateway-service
 server.port=8080
@@ -1133,7 +1300,7 @@ spring.cloud.gateway.server.webflux.routes[0].predicates[0]=Path=/api/auth/**,/a
 # Medical
 spring.cloud.gateway.server.webflux.routes[1].id=medical-service
 spring.cloud.gateway.server.webflux.routes[1].uri=lb://MEDICAL-SERVICE
-spring.cloud.gateway.server.webflux.routes[1].predicates[0]=Path=/api/medical/**,/api/contacts/**,/api/emergency/**
+spring.cloud.gateway.server.webflux.routes[1].predicates[0]=Path=/api/profile/**,/api/contacts/**,/api/emergency/**
 ```
 
 ### Route Table
@@ -1141,7 +1308,7 @@ spring.cloud.gateway.server.webflux.routes[1].predicates[0]=Path=/api/medical/**
 | Path Predicates | Target |
 |---|---|
 | `/api/auth/**`, `/api/users/**` | `lb://AUTH-SERVICE` |
-| `/api/medical/**`, `/api/contacts/**`, `/api/emergency/**` | `lb://MEDICAL-SERVICE` |
+| `/api/profile/**`, `/api/contacts/**`, `/api/emergency/**` | `lb://MEDICAL-SERVICE` |
 
 > 💡 The `lb://` prefix tells Spring Cloud Gateway to use the LoadBalancer + Eureka to discover the destination dynamically — no hardcoded hosts or ports.
 
@@ -1150,6 +1317,10 @@ spring.cloud.gateway.server.webflux.routes[1].predicates[0]=Path=/api/medical/**
 ### ⚠️ Real Issue Hit — UnknownHostException
 
 Gateway requests initially failed because Eureka registered services under the machine's **corporate hostname** (`HSC-XXXX.allegisgroup.com`), which couldn't be resolved locally. Fix: set `eureka.instance.prefer-ip-address=true` on every service so Eureka registers IP addresses instead of hostnames.
+
+### ⚠️ Real Issue Hit — Route Never Matched `/api/profile` (found during Day 6 verification)
+
+`MedicalProfileController` is mapped at `/api/profile`, but the route predicate above originally only matched `/api/medical/**` — so profile CRUD 404'd through the Gateway despite working when hit directly on port 8082. Fixed by changing the predicate to `/api/profile/**` (reflected in the config above).
 
 ---
 
@@ -1178,6 +1349,8 @@ public class EurekaServerApplication {
 
 ### Configuration
 
+> **Day 7:** now sourced from `eureka-server.yml` in `medinfo-config`; local file is just `spring.application.name` + `spring.config.import`.
+
 ```properties
 spring.application.name=eureka-server
 server.port=8761
@@ -1188,6 +1361,45 @@ eureka.client.fetch-registry=false
 ```
 
 > ℹ️ **Self Preservation Mode:** In local development the dashboard may show an "EMERGENCY!" warning. This is expected — Eureka avoids evicting instances when heartbeat traffic is low. In production with many services this disappears automatically.
+
+---
+
+## 🗂️ config-server
+
+Status: ✅ **Complete** — new in Day 7, first service in the startup order.
+
+### What it does
+
+Serves every other service's configuration from a dedicated Git repository (`medinfo-config`), centralizing almost all runtime configuration that used to be duplicated in each service's local `application.properties`. Not literally all of it — each service still keeps `spring.application.name` and `spring.config.import` locally, by design (that's how it knows what to fetch and from where). See **⚙️ Config Server — Centralized Configuration (Day 7)** above for the full design reasoning.
+
+### Project Setup
+
+```
+Project      : Maven
+Language     : Java
+Spring Boot  : 3.5.x
+Java         : 21
+Group        : com.medinfo
+Artifact     : config-server
+Package      : com.medinfo.configserver
+```
+
+**Dependencies:**
+- Spring Web
+- Spring Boot Actuator
+- Spring Cloud Config Server
+
+### Configuration
+
+```properties
+server.port=8888
+
+spring.application.name=config-server
+spring.cloud.config.server.git.uri=https://github.com/Naren-18/medinfo-config.git
+spring.cloud.config.server.git.default-label=main
+```
+
+This is the one service whose configuration genuinely can't live in `medinfo-config` itself — it's what reads that repo, so it has to be self-contained.
 
 ---
 
@@ -1276,6 +1488,13 @@ Package      : com.medinfo.auth
 
 ### Configuration
 
+> **Day 7:** local `application.properties` is now just:
+> ```properties
+> spring.application.name=auth-service
+> spring.config.import=configserver:http://localhost:8888
+> ```
+> Everything below now lives in `auth-service.yml` in the `medinfo-config` Git repo, fetched from Config Server at startup.
+
 ```properties
 spring.application.name=auth-service
 
@@ -1298,7 +1517,7 @@ eureka.client.fetch-registry=true
 eureka.instance.prefer-ip-address=true
 ```
 
-⚠️ Never commit real credentials to Git. Use environment variables in production.
+⚠️ Never commit real credentials to Git. Use environment variables in production — doubly true now that this file lives in a Git repo by design (see Config Server's Next Phase: encrypted secrets, not yet implemented).
 
 ### APIs (via Gateway — port 8080)
 
@@ -1463,6 +1682,13 @@ Package      : com.medinfo.medical
 **Database:** `medical_db` · **Port:** `8082` · **Cache:** Redis, `localhost:6379`
 
 ### Configuration
+
+> **Day 7:** local `application.properties` is now just:
+> ```properties
+> spring.application.name=medical-service
+> spring.config.import=configserver:http://localhost:8888
+> ```
+> Everything below now lives in `medical-service.yml` in the `medinfo-config` Git repo.
 
 ```properties
 spring.application.name=medical-service
@@ -1637,6 +1863,13 @@ Spring Boot  : 3.5.x
 
 ### Configuration
 
+> **Day 7:** local `application.properties` is now just:
+> ```properties
+> spring.application.name=audit-service
+> spring.config.import=configserver:http://localhost:8888
+> ```
+> Everything below now lives in `audit-service.yml` in the `medinfo-config` Git repo.
+
 ```properties
 spring.application.name=audit-service
 server.port=8083
@@ -1757,6 +1990,9 @@ audit_db
 - **Not every duplicated-looking field is a bug.** `publicProfileId` moved to Medical Service, `fullName` stayed in Auth Service — different decisions for different reasons (domain-specific identifier vs. identity data), decided by "which bounded context does this concept belong to," not "which service currently has a Feign client for it."
 - **Fixing an ownership bug can shrink blast radius as a side effect.** After the redesign, Auth Service being down only costs the `fullName` field in the Emergency Profile response — not the entire lookup, as it did before.
 - **End-to-end verification catches what unit and direct-service testing can't.** The Gateway's missing `/api/profile/**` route predicate was invisible until the full Gateway → Medical Service path was exercised for real.
+- **Configuration duplication is invisible at 2–3 services and becomes a real cost as the count grows.** Config Server centralizes it, but doesn't remove the dependency — it relocates it: every service now needs Config Server up before it can read its own port. (Day 7)
+- **Naming conventions can replace explicit wiring, at the cost of silent failure on typos.** `spring.application.name` matching `{name}.yml` in the config repo is what makes the Config Server lookup automatic — get the name wrong and a service just doesn't get its config, with no obvious pointer to why.
+- **Externalizing configuration doesn't externalize the risk of committing secrets.** JWT secrets and DB credentials moved out of each service's local file, but into a Git repo — still plaintext, still a real gap until encryption at rest is added.
 
 ---
 
@@ -1841,6 +2077,18 @@ audit_db
 - [ ] Circuit breaker (Resilience4j) for the Auth Feign call, replacing the manual try/catch
 - [ ] `publicProfileId` backfill migration for pre-existing `medical_profile` rows
 - [ ] TTL tuning based on real access-pattern data
+- [ ] Typed `RedisTemplate<String, EmergencyProfileResponseDTO>` (currently `RedisTemplate<String, Object>` with a cast at the call site)
+- [x] Created `config-server` Spring Boot application with `@EnableConfigServer`
+- [x] Created dedicated `medinfo-config` Git repository (YAML only, no code)
+- [x] Configured Config Server to read from Git (`spring.cloud.config.server.git.uri`, `default-label`)
+- [x] Migrated all per-service configuration (`auth-service.yml`, `medical-service.yml`, `audit-service.yml`, `gateway-service.yml`, `eureka-server.yml`) into the config repo
+- [x] Reduced every service's local `application.properties` to `spring.application.name` + `spring.config.import`
+- [x] Verified the full config-loading flow end to end (`GET /{application-name}/default`) for every service
+- [x] Established the new startup order (Config Server → Eureka → Auth → Medical → Audit → Gateway)
+- [ ] Config Server high availability (currently a single instance)
+- [ ] Encrypted secrets in the config repo (JWT secret, DB credentials currently plaintext)
+- [ ] Profile-specific config (dev/qa/prod)
+- [ ] Config refresh without restart (`/actuator/refresh` + Spring Cloud Bus)
 - [ ] Docker & Docker Compose for the remaining services (Redis itself is already containerized)
 - [ ] CI/CD with GitHub Actions
 - [ ] Cloud Deployment
@@ -1849,9 +2097,10 @@ audit_db
 
 ## 📅 Current Status
 
-**Five applications + Kafka broker + Redis running.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, cached where traffic demands it, reliable where failures are inevitable, and each service owns exactly the identifiers it needs to function independently:
+**Six applications + Kafka broker + Redis running, config centralized.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, cached where traffic demands it, reliable where failures are inevitable, each service owns exactly the identifiers it needs, and configuration is a single Git-backed source of truth instead of duplicated per service:
 
 ```
+Config Server (8888) → { Auth, Medical, Audit, Gateway, Eureka } — config fetched at startup
 Client → Gateway → Eureka → { AUTH, MEDICAL }
 Medical → Redis                                              (synchronous, in-process — cache-aside)
 Medical → Feign → Auth  (fullName only)                       (synchronous — narrowed scope, Day 6)
@@ -1862,8 +2111,8 @@ Audit  → existsByEventId() → ignore | save                    (on redelivery
 mvn clean test → JaCoCo HTML report per service
 ```
 
-The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer). Redis eviction on update → next read always fresh from PostgreSQL. Auth Service down → only the `fullName` field is affected, not the whole emergency lookup (narrower blast radius than before Day 6).
+The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer). Redis eviction on update → next read always fresh from PostgreSQL. Auth Service down → only the `fullName` field is affected, not the whole emergency lookup. Config Server verified end to end for every service's `GET /{application-name}/default` lookup.
 
-The strongest story from Day 6 isn't the caching itself — it's that implementing cache eviction exposed a pre-existing ownership bug (`publicProfileId` living in Auth Service when Medical Service needed it to invalidate its own cache) that had been latent in the architecture since Day 1.
+The strongest story from Day 6 isn't the caching itself — it's that implementing cache eviction exposed a pre-existing ownership bug (`publicProfileId` living in Auth Service when Medical Service needed it to invalidate its own cache) that had been latent in the architecture since Day 1. The Day 7 story is the trade-off, stated plainly: centralizing configuration removes duplication, but makes Config Server itself a new hard startup dependency for every other service — worth naming unprompted, not just presenting as a strict win.
 
-Next milestone: **Day 7 — Docker & Docker Compose** for the remaining services (Redis is already containerized), followed by CI/CD with GitHub Actions and cloud deployment 🚀
+Next milestone: **Day 8 — Docker & Docker Compose** for the remaining services (Redis is already containerized), followed by CI/CD with GitHub Actions and cloud deployment 🚀
