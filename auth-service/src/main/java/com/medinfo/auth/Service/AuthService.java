@@ -2,7 +2,7 @@ package com.medinfo.auth.Service;
 
 import com.medinfo.auth.DTO.LoginRequestDTO;
 import com.medinfo.auth.DTO.RegisterRequestDTO;
-import com.medinfo.auth.DTO.UserPublicResponseDTO;
+import com.medinfo.auth.DTO.UserBasicResponseDTO;
 import com.medinfo.auth.Entity.User;
 import com.medinfo.auth.Exception.ResourceAlreadyExistsException;
 import com.medinfo.auth.Exception.ResourceNotFoundException;
@@ -37,7 +37,6 @@ public class AuthService {
                 .email(registerRequestDTO.getEmail())
                 .password(passwordEncoder.encode(registerRequestDTO.getPassword()))
                 .created_at(LocalDateTime.now())
-                .publicProfileId(UUID.randomUUID().toString())
                 .build();
         userRepository.save(user);
         return "User Registration Completed";
@@ -53,15 +52,14 @@ public class AuthService {
         return jwtService.generateToken(user);
     }
 
-    public UserPublicResponseDTO getUserByPublicProfileId(String publicProfileId) {
-        User user=userRepository.findByPublicProfileId(publicProfileId)
-                .orElseThrow(()->new ResourceNotFoundException(
-                "User",
-                "publicProfileId",
-                publicProfileId
-        ));
-
-        return UserPublicResponseDTO.builder()
+    public UserBasicResponseDTO getUserById(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "User",
+                        "userId",
+                        userId
+                ));
+        return UserBasicResponseDTO.builder()
                 .userId(user.getId())
                 .fullName(user.getFullName())
                 .build();

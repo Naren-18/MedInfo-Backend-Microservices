@@ -2,7 +2,7 @@ package com.medinfo.auth.Service;
 
 import com.medinfo.auth.DTO.LoginRequestDTO;
 import com.medinfo.auth.DTO.RegisterRequestDTO;
-import com.medinfo.auth.DTO.UserPublicResponseDTO;
+import com.medinfo.auth.DTO.UserBasicResponseDTO;
 import com.medinfo.auth.Entity.User;
 import com.medinfo.auth.Exception.ResourceAlreadyExistsException;
 import com.medinfo.auth.Exception.ResourceNotFoundException;
@@ -138,34 +138,30 @@ class AuthServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // getUserByPublicProfileId
+    // getUserById
     // -------------------------------------------------------------------------
 
     @Test
-    void getUserByPublicProfileId_ShouldReturnDTO_WhenUserExists() {
-        String publicProfileId = "public-uuid-123";
+    void getUserById_ShouldReturnDTO_WhenUserExists() {
         User user = User.builder()
                 .id(1L)
                 .fullName("John Doe")
-                .publicProfileId(publicProfileId)
                 .build();
 
-        when(userRepository.findByPublicProfileId(publicProfileId)).thenReturn(Optional.of(user));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(user));
 
-        UserPublicResponseDTO result = authService.getUserByPublicProfileId(publicProfileId);
+        UserBasicResponseDTO result = authService.getUserById(1L);
 
         assertEquals(1L, result.getUserId());
         assertEquals("John Doe", result.getFullName());
-        verify(userRepository).findByPublicProfileId(publicProfileId);
+        verify(userRepository).findById(1L);
     }
 
     @Test
-    void getUserByPublicProfileId_ShouldThrow_WhenUserNotFound() {
-        String publicProfileId = "non-existent-uuid";
-
-        when(userRepository.findByPublicProfileId(publicProfileId)).thenReturn(Optional.empty());
+    void getUserById_ShouldThrow_WhenUserNotFound() {
+        when(userRepository.findById(99L)).thenReturn(Optional.empty());
 
         assertThrows(ResourceNotFoundException.class,
-                () -> authService.getUserByPublicProfileId(publicProfileId));
+                () -> authService.getUserById(99L));
     }
 }

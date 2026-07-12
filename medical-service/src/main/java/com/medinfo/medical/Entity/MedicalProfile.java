@@ -26,4 +26,6 @@ public class MedicalProfile {
 
     @Column(nullable = false)
     private Long userId;
+    @Column(unique = true, nullable = false)
+    private String publicProfileId;
 }

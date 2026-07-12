@@ -12,4 +12,5 @@ public interface MedicalProfileRepository extends JpaRepository<MedicalProfile,L
 
     Optional<MedicalProfile> findByUserId(Long userId);
     boolean existsByUserId(Long userId);
+    Optional<MedicalProfile> findByPublicProfileId(String publicProfileId);
 }

@@ -2,7 +2,7 @@ package com.medinfo.auth.Controller;
 
 import com.medinfo.auth.DTO.LoginRequestDTO;
 import com.medinfo.auth.DTO.RegisterRequestDTO;
-import com.medinfo.auth.DTO.UserPublicResponseDTO;
+import com.medinfo.auth.DTO.UserBasicResponseDTO;
 import com.medinfo.auth.Service.AuthService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -15,12 +15,8 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
     private final AuthService authService;
 
-    @GetMapping("/users/public/{publicProfileId}")
-    public ResponseEntity<UserPublicResponseDTO> userPublicResponse(@PathVariable String publicProfileId){
-        return ResponseEntity.ok(
-                authService.getUserByPublicProfileId(publicProfileId)
-        );
-    }
+
+
 
     @PostMapping("/register")
     public ResponseEntity<String> register(@Valid @RequestBody RegisterRequestDTO registerRequestDTO){
@@ -33,6 +29,13 @@ public class AuthController {
     public ResponseEntity<String> login(@Valid @RequestBody LoginRequestDTO loginRequestDTO){
         return ResponseEntity.ok(
                 authService.login(loginRequestDTO)
+        );
+    }
+
+    @GetMapping("/internal/users/{userId}")
+    public ResponseEntity<UserBasicResponseDTO> getUserById(@PathVariable Long userId){
+        return ResponseEntity.ok(
+                authService.getUserById(userId)
         );
     }
 

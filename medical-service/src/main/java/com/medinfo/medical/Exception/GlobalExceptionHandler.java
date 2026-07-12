@@ -51,6 +51,8 @@ public class GlobalExceptionHandler {
                         request));
     }
 
+
+
     @ExceptionHandler(ServiceUnavailableException.class)
     public ResponseEntity<ErrorResponse> handleServiceUnavailableException(
             ServiceUnavailableException ex,

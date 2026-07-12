@@ -2,13 +2,15 @@ package com.medinfo.medical.Service;
 
 import com.medinfo.medical.Client.AuthClient;
 import com.medinfo.medical.DTO.EmergencyProfileResponseDTO;
-import com.medinfo.medical.DTO.UserPublicResponseDTO;
+import com.medinfo.medical.DTO.UserBasicResponseDTO;
 import com.medinfo.medical.Entity.EmergencyContacts;
 import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Exception.ServiceUnavailableException;
+import com.medinfo.medical.Producer.AuditEventProducer;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
+import com.medinfo.medical.cache.EmergencyProfileCacheService;
 import feign.Request;
 import feign.RequestTemplate;
 import feign.RetryableException;
@@ -37,10 +39,13 @@ class EmergencyServiceTest {
     private MedicalProfileRepository medicalProfileRepository;
 
     @Mock
-    private AuthClient authClient;
+    private AuditEventProducer auditEventProducer;
 
     @Mock
-    private AuditClient auditClient;
+    private EmergencyProfileCacheService cacheService;
+
+    @Mock
+    private AuthClient authClient;
 
     @InjectMocks
     private EmergencyService emergencyService;
@@ -55,8 +60,8 @@ class EmergencyServiceTest {
         return request;
     }
 
-    private UserPublicResponseDTO buildUserPublicResponse() {
-        UserPublicResponseDTO dto = new UserPublicResponseDTO();
+    private UserBasicResponseDTO buildUser() {
+        UserBasicResponseDTO dto = new UserBasicResponseDTO();
         dto.setUserId(USER_ID);
         dto.setFullName("John Doe");
         return dto;
@@ -75,6 +80,7 @@ class EmergencyServiceTest {
                 .currentMedications("Metformin")
                 .organDonor(true)
                 .userId(USER_ID)
+                .publicProfileId(PUBLIC_PROFILE_ID)
                 .build();
     }
 
@@ -93,10 +99,27 @@ class EmergencyServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void getEmergencyProfile_ShouldReturnFullProfile() {
-        when(authClient.getUserByPublicProfileId(PUBLIC_PROFILE_ID)).thenReturn(buildUserPublicResponse());
-        when(auditClient.createAuditLog(any(CreateAuditLogRequestDTO.class))).thenReturn("logged");
-        when(medicalProfileRepository.findByUserId(USER_ID)).thenReturn(Optional.of(buildMedicalProfile()));
+    void getEmergencyProfile_ShouldReturnCachedProfile_OnCacheHit() {
+        EmergencyProfileResponseDTO cached = EmergencyProfileResponseDTO.builder()
+                .fullName("Cached Name")
+                .build();
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(cached);
+
+        EmergencyProfileResponseDTO result =
+                emergencyService.getEmergencyProfile(PUBLIC_PROFILE_ID, mockHttpRequest());
+
+        assertEquals("Cached Name", result.getFullName());
+        verify(medicalProfileRepository, never()).findByPublicProfileId(any());
+        verify(authClient, never()).getUserById(any());
+        verify(auditEventProducer, never()).publishAuditEvent(any());
+    }
+
+    @Test
+    void getEmergencyProfile_ShouldReturnFullProfile_OnCacheMiss() {
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(null);
+        when(medicalProfileRepository.findByPublicProfileId(PUBLIC_PROFILE_ID))
+                .thenReturn(Optional.of(buildMedicalProfile()));
+        when(authClient.getUserById(USER_ID)).thenReturn(buildUser());
         when(emergencyContactsRepository.findAllByUserId(USER_ID)).thenReturn(List.of(buildContact()));
 
         EmergencyProfileResponseDTO result =
@@ -113,17 +136,19 @@ class EmergencyServiceTest {
         assertEquals(1, result.getEmergencyContacts().size());
         assertEquals("Jane Doe", result.getEmergencyContacts().get(0).getName());
 
-        verify(authClient).getUserByPublicProfileId(PUBLIC_PROFILE_ID);
-        verify(auditClient).createAuditLog(any(CreateAuditLogRequestDTO.class));
-        verify(medicalProfileRepository).findByUserId(USER_ID);
+        verify(medicalProfileRepository).findByPublicProfileId(PUBLIC_PROFILE_ID);
+        verify(authClient).getUserById(USER_ID);
         verify(emergencyContactsRepository).findAllByUserId(USER_ID);
+        verify(auditEventProducer).publishAuditEvent(any());
+        verify(cacheService).cacheEmergencyProfile(eq(PUBLIC_PROFILE_ID), any());
     }
 
     @Test
     void getEmergencyProfile_ShouldReturnEmptyContactList_WhenUserHasNoContacts() {
-        when(authClient.getUserByPublicProfileId(PUBLIC_PROFILE_ID)).thenReturn(buildUserPublicResponse());
-        when(auditClient.createAuditLog(any(CreateAuditLogRequestDTO.class))).thenReturn("logged");
-        when(medicalProfileRepository.findByUserId(USER_ID)).thenReturn(Optional.of(buildMedicalProfile()));
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(null);
+        when(medicalProfileRepository.findByPublicProfileId(PUBLIC_PROFILE_ID))
+                .thenReturn(Optional.of(buildMedicalProfile()));
+        when(authClient.getUserById(USER_ID)).thenReturn(buildUser());
         when(emergencyContactsRepository.findAllByUserId(USER_ID)).thenReturn(Collections.emptyList());
 
         EmergencyProfileResponseDTO result =
@@ -134,11 +159,27 @@ class EmergencyServiceTest {
     }
 
     @Test
+    void getEmergencyProfile_ShouldThrow_WhenMedicalProfileNotFound() {
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(null);
+        when(medicalProfileRepository.findByPublicProfileId(PUBLIC_PROFILE_ID))
+                .thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class,
+                () -> emergencyService.getEmergencyProfile(PUBLIC_PROFILE_ID, mockHttpRequest()));
+
+        verify(authClient, never()).getUserById(any());
+        verify(emergencyContactsRepository, never()).findAllByUserId(any());
+    }
+
+    @Test
     void getEmergencyProfile_ShouldThrow_WhenAuthServiceIsUnavailable() {
-        // Construct a minimal feign.RetryableException to simulate a connection failure
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(null);
+        when(medicalProfileRepository.findByPublicProfileId(PUBLIC_PROFILE_ID))
+                .thenReturn(Optional.of(buildMedicalProfile()));
+
         Request feignRequest = Request.create(
                 Request.HttpMethod.GET,
-                "/api/auth/users/public/" + PUBLIC_PROFILE_ID,
+                "/api/auth/internal/users/" + USER_ID,
                 Collections.emptyMap(),
                 Request.Body.empty(),
                 new RequestTemplate()
@@ -146,8 +187,7 @@ class EmergencyServiceTest {
         RetryableException retryableException = new RetryableException(
                 -1, "Connection refused", Request.HttpMethod.GET, (Long) null, feignRequest
         );
-
-        when(authClient.getUserByPublicProfileId(PUBLIC_PROFILE_ID)).thenThrow(retryableException);
+        when(authClient.getUserById(USER_ID)).thenThrow(retryableException);
 
         ServiceUnavailableException exception = assertThrows(
                 ServiceUnavailableException.class,
@@ -155,32 +195,21 @@ class EmergencyServiceTest {
         );
 
         assertEquals("Auth Service is not available", exception.getMessage());
-        verify(medicalProfileRepository, never()).findByUserId(any());
-        verify(auditClient, never()).createAuditLog(any());
-    }
-
-    @Test
-    void getEmergencyProfile_ShouldThrow_WhenMedicalProfileNotFound() {
-        when(authClient.getUserByPublicProfileId(PUBLIC_PROFILE_ID)).thenReturn(buildUserPublicResponse());
-        when(auditClient.createAuditLog(any(CreateAuditLogRequestDTO.class))).thenReturn("logged");
-        when(medicalProfileRepository.findByUserId(USER_ID)).thenReturn(Optional.empty());
-
-        assertThrows(ResourceNotFoundException.class,
-                () -> emergencyService.getEmergencyProfile(PUBLIC_PROFILE_ID, mockHttpRequest()));
-
         verify(emergencyContactsRepository, never()).findAllByUserId(any());
+        verify(auditEventProducer, never()).publishAuditEvent(any());
     }
 
     @Test
     void getEmergencyProfile_ShouldAlwaysLogAudit_BeforeReturningProfile() {
-        when(authClient.getUserByPublicProfileId(PUBLIC_PROFILE_ID)).thenReturn(buildUserPublicResponse());
-        when(auditClient.createAuditLog(any(CreateAuditLogRequestDTO.class))).thenReturn("logged");
-        when(medicalProfileRepository.findByUserId(USER_ID)).thenReturn(Optional.of(buildMedicalProfile()));
+        when(cacheService.getEmergencyProfile(PUBLIC_PROFILE_ID)).thenReturn(null);
+        when(medicalProfileRepository.findByPublicProfileId(PUBLIC_PROFILE_ID))
+                .thenReturn(Optional.of(buildMedicalProfile()));
+        when(authClient.getUserById(USER_ID)).thenReturn(buildUser());
         when(emergencyContactsRepository.findAllByUserId(USER_ID)).thenReturn(Collections.emptyList());
 
         emergencyService.getEmergencyProfile(PUBLIC_PROFILE_ID, mockHttpRequest());
 
-        // Audit must always be called whenever a profile is successfully accessed
-        verify(auditClient, times(1)).createAuditLog(any(CreateAuditLogRequestDTO.class));
+        // Audit must always be published whenever a profile is successfully accessed
+        verify(auditEventProducer, times(1)).publishAuditEvent(any());
     }
 }

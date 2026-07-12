@@ -35,7 +35,7 @@ public class SecurityCofig {
                         .requestMatchers(
                                 "/api/auth/login",
                                 "/api/auth/register",
-                                "/api/auth/users/public/**",
+                                "/api/auth/internal/**",
                                 "/h2-console/**"
                         ).permitAll()
                         .anyRequest()

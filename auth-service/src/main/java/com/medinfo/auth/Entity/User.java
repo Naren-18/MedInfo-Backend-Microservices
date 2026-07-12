@@ -25,8 +25,7 @@ public class User {
     @CreationTimestamp
     @Column(updatable = false)
     private LocalDateTime created_at;
-    @Column(unique = true, nullable = false)
-    private String publicProfileId;
+
 
 
 }

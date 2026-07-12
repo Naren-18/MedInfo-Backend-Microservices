@@ -16,10 +16,6 @@ public class CustomFeignErrorDecoder implements ErrorDecoder {
                         "request",
                         methodKey
                 );
-            case 503:
-                return new ServiceUnavailableException(
-                        "Requested Service is unavailable"
-                );
             default:
                 return defaultErrorDecoder.decode(methodKey,response);
         }

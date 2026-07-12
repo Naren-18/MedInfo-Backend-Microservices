@@ -6,15 +6,19 @@ import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Exception.ResourceAlreadyExistsException;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
+import com.medinfo.medical.cache.EmergencyProfileCacheService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+
+import java.util.UUID;
 
 
 @Service
 @RequiredArgsConstructor
 public class MedicalProfileService {
     private final MedicalProfileRepository medicalProfileRepository;
+    private final EmergencyProfileCacheService cacheService;
 
     public MedicalProfile createProfile(CreateMedicalProfileDTO createMedicalProfileDTO){
         Long userId=getCurrentUserId();
@@ -37,6 +41,7 @@ public class MedicalProfileService {
                 .currentMedications(createMedicalProfileDTO.getCurrentMedications())
                 .organDonor(createMedicalProfileDTO.isOrganDonor())
                 .userId(userId)
+                .publicProfileId(UUID.randomUUID().toString())
                 .build();
 
         return medicalProfileRepository.save(medicalProfile);
@@ -59,7 +64,9 @@ public class MedicalProfileService {
         medicalProfile.setMedicalConditions(createMedicalProfileDTO.getMedicalConditions());
         medicalProfile.setOrganDonor(createMedicalProfileDTO.isOrganDonor());
         medicalProfile.setUserId(userId);
-        return medicalProfileRepository.save(medicalProfile);
+        medicalProfileRepository.save(medicalProfile);
+        cacheService.evictEmergencyProfile(medicalProfile.getPublicProfileId());
+        return medicalProfile;
 
     }
 

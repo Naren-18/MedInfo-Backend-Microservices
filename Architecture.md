@@ -52,12 +52,11 @@ medinfo-common
         ▼              ▼              ▼
    AUTH SERVICE   MEDICAL SERVICE   AUDIT SERVICE
      (8081)          (8082)            (8083)
-        ▲               │                 ▲
-        │               │                 │
+        ▲               │  ▲              ▲
+        │               │  └──Redis (Cache-Aside, localhost:6379)
         └────Feign──────┘                 │
-            (User Lookup)                 │
-                                          │
-                              AuditLogEvent
+       (fullName only —                   │
+        Day 6 redesign)       AuditLogEvent
                                           │
                                           ▼
                                   Apache Kafka
@@ -72,13 +71,14 @@ medinfo-common
                                           ▼
                                       audit_db
 
-     auth_db          medical_db         audit_db
+     auth_db          medical_db         audit_db          Redis (6379)
 ```
 
 | Interaction | Style | Why |
 |---|---|---|
-| Medical → Auth | OpenFeign | Medical Service requires the userId before continuing |
+| Medical → Auth | OpenFeign | Resolving `fullName` — the only remaining thing Medical Service doesn't own (Day 6 narrowed this from full user resolution) |
 | Medical → Audit | Kafka | Audit logging is asynchronous and should never block the client response |
+| Medical → Redis | Synchronous, in-process | Not a microservice — a cache, consulted before either of the above (Day 6) |
 
 **Gateway Request Lifecycle:**
 ```
@@ -90,8 +90,8 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 |---|---|---|
 | **API Gateway** | 8080 | Single public entry point, dynamic routing, Eureka-integrated load balancing |
 | **Eureka Server** | 8761 | Service Registry, Heartbeats, Dashboard |
-| **Auth Service** | 8081 | User, Login, Registration, JWT Generation, Spring Security, Public User API |
-| **Medical Service** | 8082 | Medical Profile, Emergency Contacts, Emergency Profile APIs, OpenFeign user resolution, Kafka Producer |
+| **Auth Service** | 8081 | User (id, fullName, email, password), Login, Registration, JWT Generation, Spring Security, minimal internal user-by-id API |
+| **Medical Service** | 8082 | Medical Profile (incl. `publicProfileId` — moved here Day 6), Emergency Contacts, Emergency Profile APIs, Redis cache, OpenFeign `fullName` resolution, Kafka Producer |
 | **Audit Service** | 8083 | Centralized audit logging — pure Kafka consumer, no REST API |
 
 **Core principles:**
@@ -108,6 +108,7 @@ Client → API Gateway → Route Matching → Eureka Service Discovery
 - Producer publishes events without knowing which services consume them.
 - Consumers independently process events from Kafka topics.
 - Consumer Groups and Offsets ensure reliable message consumption.
+- A cache key belongs to the service that owns the resource it identifies — if a service can't compute or invalidate its own cache key without calling another service, the identifier is owned by the wrong service (Day 6).
 
 Each service has:
 - ✅ Independent Spring Boot application
@@ -680,6 +681,281 @@ This completes a production-grade Kafka consumer: capable of surviving transient
 
 ---
 
+## 🗄️ Redis Caching & Architecture Refactoring (Day 6)
+
+### Why Redis?
+
+`GET /api/emergency/{publicProfileId}` is public, unauthenticated, and accessed via QR code scans — expected to be the highest-traffic endpoint in the system, and the same profile can be scanned repeatedly in a short window (multiple first responders). Without caching, every request paid for a Feign call to Auth plus two PostgreSQL queries, even though emergency data (blood group, allergies, medications, contacts) changes rarely.
+
+```
+Emergency API → Call Auth Service (Feign) → Query Medical Profile → Query Emergency Contacts → Build Response → Return
+```
+
+High read frequency + low write frequency is a textbook caching case. Redis fits because it's an in-memory key-value store and the access pattern — fetch by one known key — maps directly onto Redis's GET/SET model.
+
+### Cache-Aside Pattern
+
+Chosen over write-through or read-through:
+
+```
+Client → Emergency API → Redis
+                            │
+                          Hit?
+                    ┌───────┴───────┐
+                   Yes              No
+                    │                │
+                 Return          PostgreSQL → Build Response → Save to Redis → Return
+```
+
+| Property | Benefit |
+|---|---|
+| Simple to implement | No cache-provider write hooks, no dual-write complexity |
+| Redis is never the source of truth | PostgreSQL always owns the data — Redis can be flushed entirely with zero data loss |
+| Cache populated lazily | Only profiles that are actually scanned get cached, no wasted memory pre-warming |
+| Explicit invalidation | The application decides exactly when an entry goes stale, not a cache provider's heuristics |
+
+**Docker Compose:**
+```yaml
+redis:
+  image: redis:7.2-alpine
+  container_name: redis
+  ports:
+    - "6379:6379"
+  restart: unless-stopped
+```
+Runs at `localhost:6379`, matched by `medical-service`'s `spring.data.redis.host` / `spring.data.redis.port`.
+
+### Spring Boot Redis Integration
+
+Dependency: `spring-boot-starter-data-redis`.
+
+```java
+@Configuration
+@EnableCaching
+public class RedisConfig {
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory){
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
+        template.afterPropertiesSet();
+        return template;
+    }
+}
+```
+
+**Why two serializers?** Redis stores raw bytes — every read/write round-trips `Java Object → JSON → Redis` and back. Keys use `StringRedisSerializer` because cache keys (`emergency-profile::<publicProfileId>`) should stay plain, readable strings. Values use `GenericJackson2JsonRedisSerializer`, which embeds the fully-qualified class name into the stored JSON so deserialization can reconstruct the right DTO type without the caller specifying it.
+
+### ⚠️ Real Issue Hit — Missing No-Args Constructor
+
+```
+Cannot construct instance of `com.medinfo.medical.DTO.EmergencyProfileResponseDTO`
+(no Creators, like default constructor, exist)
+```
+
+**Root cause:** Jackson instantiates via a no-args constructor then populates fields — `EmergencyProfileResponseDTO` and `EContactsDTO` only had `@Builder` + `@AllArgsConstructor`, no default constructor.
+
+**Fix:** added `@NoArgsConstructor` to both DTOs, alongside the existing `@Builder`/`@AllArgsConstructor` — they coexist fine since they serve different callers (service code vs. Jackson).
+
+```java
+@Getter @Setter @Builder @NoArgsConstructor @AllArgsConstructor
+public class EmergencyProfileResponseDTO {
+    private String fullName;
+    private Integer age;
+    // ...
+    private List<EContactsDTO> emergencyContacts;
+}
+```
+
+### Refactor: Single Responsibility
+
+The first working version put Redis logic directly inside `EmergencyService` (`Redis GET → Database → Redis SET`). It worked, but the service became responsible for two unrelated things — business logic and cache infrastructure (key formatting, serialization, TTL) — harder to test and harder to change independently.
+
+**Extracted `EmergencyProfileCacheService`:**
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class EmergencyProfileCacheService {
+    private final RedisTemplate<String,Object> redisTemplate;
+
+    private String getCacheKey(String publicProfileId) {
+        return "emergency-profile::" + publicProfileId;
+    }
+
+    public EmergencyProfileResponseDTO getEmergencyProfile(String publicProfileId){
+        return (EmergencyProfileResponseDTO) redisTemplate.opsForValue().get(getCacheKey(publicProfileId));
+    }
+
+    public void cacheEmergencyProfile(String publicProfileId, EmergencyProfileResponseDTO response){
+        redisTemplate.opsForValue().set(getCacheKey(publicProfileId), response, Duration.ofMinutes(10));
+    }
+
+    public void evictEmergencyProfile(String publicProfileId){
+        redisTemplate.delete(getCacheKey(publicProfileId));
+    }
+}
+```
+
+```
+EmergencyService → EmergencyProfileCacheService → Redis
+```
+
+`EmergencyService` now only orchestrates business logic and calls this service — it has no idea Redis exists underneath. **Benefit realized immediately:** unit tests for `EmergencyService` mock `EmergencyProfileCacheService` as a single collaborator — they never touch `RedisTemplate` directly, and swapping the cache implementation later only touches this one class.
+
+### Cache Key, Hit/Miss, Eviction, TTL
+
+**Key:** `emergency-profile::<publicProfileId>` — exactly what the client sends in the URL, no transformation needed.
+
+**Hit:** no database query, no Feign call, no Kafka event — served entirely from memory.
+
+**Eviction on update** (`MedicalProfileService.updateProfile()`):
+```
+Update PostgreSQL → Delete Redis Key → Next Request → Cache MISS → Fresh Data
+```
+Prevents a first responder from ever seeing stale medical information (e.g. an outdated allergy list) — correctness matters more than hit ratio here.
+
+**TTL — implemented as a safety net, not the primary invalidation mechanism:**
+```java
+redisTemplate.opsForValue().set(cacheKey, response, Duration.ofMinutes(10));
+```
+Every entry expires after 10 minutes regardless of whether eviction fired. Eviction is triggered by application code, and application code can have bugs or missed call sites — TTL bounds how long a forgotten eviction path can serve stale data. A backstop, not a substitute for explicit eviction.
+
+### The Architecture Flaw Redis Exposed
+
+Redis didn't cause this problem — it made an existing design smell impossible to ignore.
+
+**Before:** `publicProfileId` lived on `User` (Auth Service). Medical Service always resolved it via a Feign call before doing anything — circuitous but functionally fine, since every read needed that round trip anyway.
+
+**What changed:** eviction needed `publicProfileId` inside `MedicalProfileService.updateProfile()`, which only had `userId` (from the JWT) — `publicProfileId` lived in Auth Service's database, which Medical Service cannot query directly.
+
+```
+MedicalProfileService.updateProfile() → Need: publicProfileId (to evict the right key)
+                                       → Have: userId only
+                                       → ❌ Cannot resolve without another cross-service call
+```
+
+**The problem, named precisely:** the service that owns the Emergency Profile (Medical Service) did not own the identifier used to look it up (`publicProfileId`, owned by Auth Service).
+
+| Bounded Context | Owns |
+|---|---|
+| Identity (Auth Service) | Login, password, JWT, roles |
+| Emergency Profile (Medical Service) | Blood group, allergies, medications, emergency contacts, the identifier used to look them up |
+
+`publicProfileId` is an Emergency Profile concept — it exists for QR-code lookups of medical data, nothing to do with authentication. It was living in the wrong bounded context; Redis was simply the first feature requiring Medical Service to *act on* data it didn't own, rather than just read it once per request.
+
+### Redesign: Moving `publicProfileId`
+
+**Decision:** move `publicProfileId` from `auth-service.User` to `medical-service.MedicalProfile`. Medical Service generates and owns it.
+
+**Auth Service — removed:** `publicProfileId` field from `User`, `UserRepository.findByPublicProfileId(...)`, `AuthService.getUserByPublicProfileId(...)`, and the `GET /api/users/public/{publicProfileId}` endpoint entirely.
+
+**Medical Service — added**, generated once at profile creation:
+```java
+MedicalProfile medicalProfile = MedicalProfile.builder()
+        // ... medical fields ...
+        .userId(userId)
+        .publicProfileId(UUID.randomUUID().toString())
+        .build();
+```
+Column: `unique = true, nullable = false`. New repository method: `findByPublicProfileId(String publicProfileId)`.
+
+**Result:** `MedicalProfileService.updateProfile()` evicts its own cache without asking anyone, and the Emergency API resolves the medical-data portion of the response with **no Feign call, no dependency on Auth Service being up**, just to find its own resource. Strictly better regardless of caching — Redis just made the cost of not fixing it immediate and visible.
+
+### The `fullName` Question — Why Identity Stays in Auth Service
+
+Natural follow-up: should `fullName` move too, for a zero-cross-service-call resolution? **Rejected.**
+
+| Option | Description | Verdict |
+|---|---|---|
+| A — Independent field | Medical Service collects its own `fullName` at profile creation, unrelated to the Auth account | Rejected — two names for one person with no defined relationship |
+| B — Auth is source of truth, fetched live | Medical Service never stores `fullName`; asks Auth by `userId` on every cache miss | ✅ Chosen |
+| C — Auth is source of truth, replicated via Kafka event | Auth publishes `UserUpdated`; Medical keeps a local read-replica | Rejected for now — new event/consumer + eventual-consistency window for a field accessed once per cache-miss, not worth it yet |
+
+`fullName` is identity data, not an Emergency Profile concept — `bloodGroup` and `publicProfileId` are, `fullName` isn't. Same principle applied consistently: each service owns its own data, others request it, never copy it. (A leftover redundant `fullname` column on `MedicalProfile` from an earlier iteration was found and removed while confirming this.)
+
+**New minimal Auth API**, replacing the retired public-profile-based lookup, keyed on the identifier Medical Service actually has after resolving its own profile:
+```java
+@GetMapping("/internal/users/{userId}")
+public ResponseEntity<UserBasicResponseDTO> getUserById(@PathVariable Long userId){
+    return ResponseEntity.ok(authService.getUserById(userId));
+}
+```
+Full path `/api/auth/internal/users/{userId}`, marked `permitAll()` — matching how the old lookup actually behaved (service-to-service Feign calls never carried a JWT; it was never really "protected," just not publicly advertised).
+
+### ⚠️ Real Issue Hit — Feign Failures Still Need Handling
+
+Even after the ownership fix, a live Feign call to Auth Service can still fail if Auth is down:
+```java
+try {
+    user = authClient.getUserById(userId);
+} catch (RetryableException ex) {
+    throw new ServiceUnavailableException("Auth Service is not available");
+}
+```
+`ServiceUnavailableException` → 503 was re-added to `GlobalExceptionHandler`. The failure mode is now **narrower** than before the redesign: Auth being down only breaks the `fullName` field, not the entire lookup — medical data resolves with zero Auth dependency.
+
+### ⚠️ Real Issue Hit — Gateway Never Routed `/api/profile`
+
+Verifying the redesign end-to-end surfaced a pre-existing, unrelated bug: `MedicalProfileController` is mapped at `/api/profile`, but the Gateway's route predicate only forwarded `/api/medical/**` — so profile CRUD 404'd through the Gateway despite working when hit directly on port 8082.
+```diff
+- Path=/api/medical/**,/api/contacts/**,/api/emergency/**
++ Path=/api/profile/**,/api/contacts/**,/api/emergency/**
+```
+
+### Final Emergency Profile Flow (with Redis)
+
+```
+QR Scan → publicProfileId → Redis GET (emergency-profile::<publicProfileId>)
+  Cache HIT?  ──Yes──► Return cached response (no DB, no Feign, no Kafka)
+     No
+     ↓
+  MedicalProfileRepository.findByPublicProfileId() → MedicalProfile → userId
+     ↓
+  Feign → Auth Service → fullName   (the only remaining cross-service call)
+     ↓
+  EmergencyContactsRepository.findAllByUserId()
+     ↓
+  Publish Kafka audit event (fire-and-forget)
+     ↓
+  Build DTO → Cache in Redis (TTL 10 min) → Return
+```
+
+> Only cache **misses** currently publish the Kafka audit event — a cache hit is still a real access to someone's emergency data and arguably should be logged too (flagged in Next Phase below, not yet fixed).
+
+**Update flow:** `PUT /api/profile → Save to PostgreSQL → cacheService.evictEmergencyProfile(publicProfileId) → Return`. No Feign call needed to evict — Medical Service has always had everything it needs, once ownership was corrected.
+
+### Final Ownership
+
+| Service | Owns | Exposes |
+|---|---|---|
+| Auth Service | `User`: id, fullName, email, password, createdAt | `GET /api/auth/internal/users/{userId}` → `UserBasicResponseDTO` |
+| Medical Service | `MedicalProfile` (userId, **publicProfileId**, medical data), EmergencyContacts, Redis Cache, Emergency API | Emergency Profile endpoints |
+
+### Design Principles Applied
+
+Cache-Aside Pattern · Single Responsibility Principle · Bounded Context · Separation of Concerns · Source of Truth (Auth owns `fullName`; PostgreSQL owns everything behind Redis)
+
+### Key Learnings
+
+- Implementing Redis itself is easy — deciding **what** to cache and **who owns** the cached data is the actual architectural work.
+- A cache key should belong to the service that owns the resource it identifies. If a service can't compute its own cache key without calling another service, that's a sign the identifier is owned by the wrong service.
+- Redis didn't introduce the `publicProfileId` ownership flaw — it made the cost of ignoring it (an unresolvable cache eviction) immediate instead of latent.
+- Not every duplicated-looking field is a bug: `fullName` staying in Auth while `publicProfileId` moves to Medical are different decisions because they're different kinds of data — identity vs. domain-specific identifier. The DDD bounded-context question ("which context does this concept belong to?") is the real test, not "which service currently has a Feign client for it."
+- Moving an identifier's ownership can shrink a service's blast radius from a downstream failure — Auth being down no longer breaks emergency lookups entirely, only the `fullName` field within them.
+
+### Next Phase (Not Yet Done)
+
+- **Cache-hit audit logging** — only cache misses currently publish a Kafka audit event.
+- **Circuit breaker for the Auth Feign call** — replace the manual `try/catch (RetryableException)` with a Resilience4j circuit breaker + fallback.
+- **Backfill migration** — existing `medical_profile` rows created before this migration may have a `NULL publicProfileId`; needs a data migration before this reaches an environment with real data (`ddl-auto=update` can't add the `NOT NULL` constraint until that's resolved).
+- **TTL tuning** — 10 minutes was a starting value; revisit once there's real access-pattern data.
+
+---
+
 ## 🧪 Testing (Day 4)
 
 All three business services carry **JUnit 5 + Mockito** unit test suites with **JaCoCo** coverage reporting.
@@ -927,16 +1203,15 @@ auth-service
 │      SecurityConfig.java ✅
 │
 ├── controller
-│      AuthController.java ✅
-│      UserController.java ✅
+│      AuthController.java ✅   (includes internal user-by-id endpoint — Day 6)
 │
 ├── dto
 │      LoginRequestDTO.java ✅
 │      RegisterRequestDTO.java ✅
-│      UserPublicResponseDTO.java ✅
+│      UserBasicResponseDTO.java ✅   (replaced UserPublicResponseDTO — Day 6)
 │
 ├── entity
-│      User.java ✅
+│      User.java ✅   (publicProfileId removed — moved to medical-service, Day 6)
 │
 ├── exception
 │      GlobalExceptionHandler.java ✅
@@ -966,15 +1241,15 @@ auth-service
 ```
 
 ### Responsibilities
-- User registration with UUID-based public profile ID
-- Login with BCrypt password verification
+- User registration, login with BCrypt password verification
 - JWT generation — includes **custom claims** (`userId`, `role`) so downstream services authenticate without a database lookup
 - JWT validation via `JWTAuthenticationFilter` (runs on every request)
 - `CustomUserDetailsService` — loads user from DB for Spring Security
-- **Public User API** — `GET /api/users/public/{publicProfileId}` returns `userId` + `fullName` for downstream services
+- **Minimal internal user API** — `GET /api/auth/internal/users/{userId}` returns `userId` + `fullName` only, for Medical Service to resolve the one identity field it doesn't own (Day 6 — replaced the old `publicProfileId`-keyed public lookup, since Auth Service no longer knows about `publicProfileId` at all)
+- Identity is now Auth Service's **only** concern — `publicProfileId` (an Emergency Profile concept) was moved out to Medical Service, Day 6
 - Centralized exception handling with custom exceptions and `ErrorResponse` model
 - **Eureka Client** — registers as `AUTH-SERVICE` and sends heartbeats
-- **Fully unit tested** — registration, login, JWT lifecycle, user lookup
+- **Fully unit tested** — registration, login, JWT lifecycle, internal user lookup
 
 ### Project Setup
 
@@ -1067,10 +1342,9 @@ JWT payload contains custom claims:
 }
 ```
 
-**Get Public User by Profile ID** *(inter-service use)*
+**Get User By ID** *(inter-service use only — Day 6, replaced the old public-profile-based lookup)*
 ```
-GET /api/users/public/{publicProfileId}
-Authorization: Bearer <jwt_token>
+GET /api/auth/internal/users/{userId}
 ```
 Response:
 ```json
@@ -1079,6 +1353,7 @@ Response:
   "fullName": "Narendra Kumar"
 }
 ```
+`permitAll()` — no JWT required. This matches how the old lookup actually behaved in practice (Feign calls never carried a token); the endpoint is simply not publicly advertised.
 
 ---
 
@@ -1090,12 +1365,16 @@ Status: ✅ **Complete** — pure medical domain, audit via Kafka events, unit t
 
 ```
 medical-service
+├── cache
+│      EmergencyProfileCacheService.java ✅   ← Day 6
+│      │
 ├── client
 │      AuthClient.java ✅
 │      │
 ├── config
 │      SecurityConfig.java ✅
 │      FeignConfig.java ✅
+│      RedisConfig.java ✅   ← Day 6
 │
 ├── controller
 │      EmergencyController.java ✅
@@ -1103,14 +1382,14 @@ medical-service
 │      MedicalProfileController.java ✅
 │
 ├── dto
-│      CreateMedicalProfileDTO.java ✅
+│      CreateMedicalProfileDTO.java ✅   (redundant fullName field removed — Day 6)
 │      MedicalProfileResponseDTO.java ✅
-│      EmergencyProfileResponseDTO.java ✅
-│      EContactsDTO.java ✅
-│      UserPublicResponseDTO.java ✅
+│      EmergencyProfileResponseDTO.java ✅   (@NoArgsConstructor added — Day 6)
+│      EContactsDTO.java ✅   (@NoArgsConstructor added — Day 6)
+│      UserBasicResponseDTO.java ✅   (replaced UserPublicResponseDTO — Day 6)
 │      │
 ├── entity
-│      MedicalProfile.java ✅
+│      MedicalProfile.java ✅   (now owns publicProfileId — moved from Auth Service, Day 6; redundant fullname field removed)
 │      EmergencyContacts.java ✅
 │
 ├── exception
@@ -1144,16 +1423,17 @@ medical-service
 ```
 
 ### Responsibilities
-- Medical Profile CRUD
+- Medical Profile CRUD — now owns and generates `publicProfileId` (`UUID.randomUUID()`) at profile creation (Day 6)
 - Emergency Contacts CRUD
-- Public Emergency Profile API — resolves `publicProfileId` → `userId` via OpenFeign call to Auth Service
-- **Kafka producer** — publishes `AuditLogEvent` to `emergency-access-events` on every emergency access, keyed by userId (Day 5)
+- Public Emergency Profile API — resolves `publicProfileId` → `MedicalProfile` locally (own database, own identifier, Day 6), then Feign to Auth Service only for `fullName`
+- **Redis cache (Cache-Aside)** — `EmergencyProfileCacheService` fronts the Emergency Profile API; 10-min TTL as a safety net alongside explicit eviction on update (Day 6)
+- **Kafka producer** — publishes `AuditLogEvent` to `emergency-access-events` on every emergency access **cache miss**, keyed by userId (Day 5)
 - **JWT validation only** — does not generate tokens, uses the same signing secret as Auth Service
 - **No direct access to other services' databases** — `userId` references + Feign/events only
-- **One OpenFeign client** — `AuthClient` (user resolution), resolved by name through Eureka
+- **One OpenFeign client** — `AuthClient`, narrowed to `fullName` resolution only (Day 6; previously resolved the whole user)
 - **Centralized exception framework** with custom exceptions, `ErrorResponse`, and `CustomFeignErrorDecoder`
 - **Eureka Client** — registers as `MEDICAL-SERVICE`
-- **Fully unit tested** — CRUD paths, ownership validation across users, mocked Feign clients including downstream-unavailable, mocked SecurityContext
+- **Fully unit tested** — CRUD paths, ownership validation across users, mocked Feign clients including downstream-unavailable, mocked SecurityContext, mocked `EmergencyProfileCacheService`
 
 ### Project Setup
 
@@ -1177,9 +1457,10 @@ Package      : com.medinfo.medical
 - Spring Cloud OpenFeign (`spring-cloud-starter-openfeign`)
 - Spring Cloud Netflix Eureka Client
 - Spring Kafka (`spring-kafka`) ← Day 5
+- Spring Boot Starter Data Redis (`spring-boot-starter-data-redis`) ← Day 6
 - Spring Boot Test + Mockito
 
-**Database:** `medical_db` · **Port:** `8082`
+**Database:** `medical_db` · **Port:** `8082` · **Cache:** Redis, `localhost:6379`
 
 ### Configuration
 
@@ -1209,9 +1490,13 @@ eureka.instance.prefer-ip-address=true
 spring.kafka.bootstrap-servers=localhost:9092
 spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
 spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
+
+# Redis (Day 6)
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
 ```
 
-### Emergency Profile Flow (Gateway + Eureka + Feign + Kafka)
+### Emergency Profile Flow (Gateway + Eureka + Redis + Feign + Kafka) — Day 6
 
 ```
 Client
@@ -1220,27 +1505,42 @@ API Gateway (8080) → route match /api/emergency/**
 ↓
 Eureka → MEDICAL-SERVICE
 ↓
-Medical Service
+Redis GET (emergency-profile::<publicProfileId>)
 ↓
-AuthClient (OpenFeign) → Eureka → AUTH-SERVICE
+Cache HIT? ──Yes──► Return cached EmergencyProfileResponseDTO immediately (no DB, no Feign, no Kafka)
+↓ No
+MedicalProfileRepository.findByPublicProfileId()   ← Medical Service resolves its own resource, no Feign needed (Day 6)
 ↓
-UserPublicResponseDTO { userId, fullName }
+MedicalProfile → userId
 ↓
-Medical Service → MedicalProfileRepository → EmergencyContactsRepository
+AuthClient (OpenFeign) → Eureka → AUTH-SERVICE   ← only remaining cross-service call, fullName only
+↓
+UserBasicResponseDTO { userId, fullName }
+↓
+EmergencyContactsRepository.findAllByUserId()
 ↓
 event.eventId = UUID.randomUUID()   ← unique identity for idempotent consumption
 ↓
 kafkaTemplate.send("emergency-access-events", userId, event)   ← fire and forget (Day 5)
 ↓
-EmergencyProfileResponseDTO returned immediately
+Build EmergencyProfileResponseDTO → cacheService.cacheEmergencyProfile() (TTL 10 min)
 ↓
-Client
+Return to Client
 
               (asynchronously, at its own pace)
 Kafka topic → Audit Service @KafkaListener → audit_db
 ```
 
-Medical Service touches only `medical_db` — user data comes from Auth Service, audit events flow through Kafka.
+Medical Service touches only `medical_db` (and Redis) — `fullName` is the only field still sourced from Auth Service; audit events flow through Kafka on cache misses.
+
+**Update flow:**
+```
+PUT /api/profile → MedicalProfileService.updateProfile() → Save to medical_db
+↓
+cacheService.evictEmergencyProfile(medicalProfile.getPublicProfileId())   ← no Feign call needed, Day 6
+↓
+Return
+```
 
 ### Key Architectural Changes
 
@@ -1269,6 +1569,17 @@ Emergency Profile Viewed → EmergencyAccessLogService → medical_db
 // Day 5: asynchronous event
 Emergency Profile Viewed → KafkaTemplate → emergency-access-events → Audit Service → audit_db
 ```
+
+**Identifier ownership — `publicProfileId` moved from Auth Service to Medical Service (Day 6):**
+```java
+// Before — auth-service.User
+private String publicProfileId;   // Medical Service had to call Auth to get its own resource's key
+
+// After — medical-service.MedicalProfile
+@Column(unique = true, nullable = false)
+private String publicProfileId;   // generated locally: UUID.randomUUID().toString()
+```
+Root cause was cache eviction: `updateProfile()` only had `userId`, not `publicProfileId`, so it couldn't invalidate its own Redis key without a cross-service call — a strong signal the identifier was owned by the wrong service. `fullName` deliberately stayed in Auth Service (identity data, not an Emergency Profile concept) — see the Day 6 section above for the full reasoning.
 
 **Exception Handling — custom exceptions + Feign Error Decoder:**
 
@@ -1440,6 +1751,12 @@ audit_db
 - **The consumer owns retry and dead-letter responsibility, so it owns topic management too.** Moving `KafkaTopicConfig` from Medical Service to Audit Service kept ownership aligned with responsibility.
 - **A Dead Letter Topic needs a producer.** Even a pure-consumer service becomes a producer the moment it needs to publish failed events elsewhere — this doesn't break the "Audit Service has no REST API" principle, since it's an internal Kafka-to-Kafka handoff, not a client-facing endpoint.
 - **Kafka's at-least-once delivery is a guarantee, not an edge case.** Idempotency (`eventId` + unique constraint + `existsByEventId()`) has to be designed in from the start, not bolted on after a duplicate-row bug in production.
+- **Implementing a cache is easy; deciding what to cache and who owns the cached data is the real work.** The Cache-Aside pattern itself was a day's work; the ownership question it exposed took longer to reason through than the Redis wiring did. (Day 6)
+- **A cache key should belong to the service that owns the resource it identifies.** If a service can't compute or invalidate its own cache key without calling another service, that's a sign the identifier is owned by the wrong service — not just a caching inconvenience.
+- **A feature can expose a pre-existing design flaw without causing it.** `publicProfileId` had been in the wrong bounded context since Day 1; Redis didn't create that problem, it just made ignoring it impossible once cache eviction needed the identifier.
+- **Not every duplicated-looking field is a bug.** `publicProfileId` moved to Medical Service, `fullName` stayed in Auth Service — different decisions for different reasons (domain-specific identifier vs. identity data), decided by "which bounded context does this concept belong to," not "which service currently has a Feign client for it."
+- **Fixing an ownership bug can shrink blast radius as a side effect.** After the redesign, Auth Service being down only costs the `fullName` field in the Emergency Profile response — not the entire lookup, as it did before.
+- **End-to-end verification catches what unit and direct-service testing can't.** The Gateway's missing `/api/profile/**` route predicate was invisible until the full Gateway → Medical Service path was exercised for real.
 
 ---
 
@@ -1504,8 +1821,27 @@ audit_db
 - [x] Added unique DB constraint on `AuditLog.eventId`
 - [x] Implemented `existsByEventId()` idempotency check
 - [x] Tested duplicate delivery — verified exactly one row per event
-- [ ] Redis Caching (Day 6)
-- [ ] Docker & Docker Compose
+- [x] Added Redis to `docker-compose.yml`
+- [x] Configured Spring Boot Redis integration (`RedisConfig`, `RedisTemplate` with String/JSON serializers)
+- [x] Implemented the Cache-Aside pattern in `EmergencyService`
+- [x] Fixed JSON serialization by adding `@NoArgsConstructor` to `EmergencyProfileResponseDTO` and `EContactsDTO`
+- [x] Refactored cache logic into a dedicated `EmergencyProfileCacheService` (SRP)
+- [x] Implemented cache-key design (`emergency-profile::<publicProfileId>`), hit/miss logging, and 10-min TTL as a safety net
+- [x] Implemented cache eviction on profile update
+- [x] Identified the architectural flaw Redis exposed — Medical Service couldn't evict its own cache because it didn't own `publicProfileId`
+- [x] Moved `publicProfileId` from `auth-service.User` to `medical-service.MedicalProfile`, generated via `UUID.randomUUID()`
+- [x] Removed the old `GET /api/users/public/{publicProfileId}` endpoint and related methods from Auth Service
+- [x] Rejected duplicating `fullName` into Medical Service — kept identity data in Auth Service
+- [x] Removed the pre-existing redundant `fullname` field from `MedicalProfile` / `CreateMedicalProfileDTO`
+- [x] Added a minimal internal Auth API — `GET /api/auth/internal/users/{userId}` → `UserBasicResponseDTO`
+- [x] Re-added `ServiceUnavailableException` + 503 handler for Auth Feign failures
+- [x] Fixed a Gateway routing bug (`/api/profile/**` was never routed) discovered while verifying the redesign end-to-end
+- [x] Updated all affected unit tests (`AuthServiceTest`, `EmergencyServiceTest`, `MedicalProfileServiceTest`) to match the new ownership model
+- [ ] Cache-hit audit logging (currently only cache misses publish a Kafka event)
+- [ ] Circuit breaker (Resilience4j) for the Auth Feign call, replacing the manual try/catch
+- [ ] `publicProfileId` backfill migration for pre-existing `medical_profile` rows
+- [ ] TTL tuning based on real access-pattern data
+- [ ] Docker & Docker Compose for the remaining services (Redis itself is already containerized)
 - [ ] CI/CD with GitHub Actions
 - [ ] Cloud Deployment
 
@@ -1513,18 +1849,21 @@ audit_db
 
 ## 📅 Current Status
 
-**Five applications + Kafka broker running.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, and reliable where failures are inevitable:
+**Five applications + Kafka broker + Redis running.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, cached where traffic demands it, reliable where failures are inevitable, and each service owns exactly the identifiers it needs to function independently:
 
 ```
 Client → Gateway → Eureka → { AUTH, MEDICAL }
-Medical → Feign → Auth                                     (synchronous — response needs userId)
-Medical → Kafka → emergency-access-events → Audit           (asynchronous — fire and forget)
+Medical → Redis                                              (synchronous, in-process — cache-aside)
+Medical → Feign → Auth  (fullName only)                       (synchronous — narrowed scope, Day 6)
+Medical → Kafka → emergency-access-events → Audit             (asynchronous — fire and forget, on cache miss)
 Audit  → Retry (3×) → DeadLetterPublishingRecoverer → emergency-access-events.DLT   (on failure)
-Audit  → existsByEventId() → ignore | save                  (on redelivery)
+Audit  → existsByEventId() → ignore | save                    (on redelivery)
 
 mvn clean test → JaCoCo HTML report per service
 ```
 
-The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer).
+The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer). Redis eviction on update → next read always fresh from PostgreSQL. Auth Service down → only the `fullName` field is affected, not the whole emergency lookup (narrower blast radius than before Day 6).
 
-Next milestone: **Day 6 — Redis Caching** — Spring Cache abstraction (`@Cacheable`, `@CacheEvict`, `@CachePut`), caching the emergency profile response, cache invalidation on updates, TTL strategy, and the cache-aside pattern 🚀
+The strongest story from Day 6 isn't the caching itself — it's that implementing cache eviction exposed a pre-existing ownership bug (`publicProfileId` living in Auth Service when Medical Service needed it to invalidate its own cache) that had been latent in the architecture since Day 1.
+
+Next milestone: **Day 7 — Docker & Docker Compose** for the remaining services (Redis is already containerized), followed by CI/CD with GitHub Actions and cloud deployment 🚀

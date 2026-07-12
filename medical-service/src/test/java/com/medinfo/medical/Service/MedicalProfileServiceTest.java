@@ -6,6 +6,7 @@ import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Exception.ResourceAlreadyExistsException;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
+import com.medinfo.medical.cache.EmergencyProfileCacheService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,6 +29,9 @@ class MedicalProfileServiceTest {
 
     @Mock
     private MedicalProfileRepository medicalProfileRepository;
+
+    @Mock
+    private EmergencyProfileCacheService cacheService;
 
     @InjectMocks
     private MedicalProfileService medicalProfileService;
@@ -75,6 +79,7 @@ class MedicalProfileServiceTest {
                 .currentMedications("None")
                 .organDonor(true)
                 .userId(USER_ID)
+                .publicProfileId("public-uuid-123")
                 .build();
     }
 
@@ -125,6 +130,7 @@ class MedicalProfileServiceTest {
         assertEquals("A+", result.getBloodGroup());
         assertEquals(30, result.getAge());
         verify(medicalProfileRepository).save(existing);
+        verify(cacheService).evictEmergencyProfile("public-uuid-123");
     }
 
     @Test
