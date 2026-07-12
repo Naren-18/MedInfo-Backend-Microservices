@@ -119,13 +119,11 @@ JUnit 5 + Mockito across auth, medical, and audit services — success **and** f
 ## 🚀 Running Locally
 
 ```bash
-# 1. Start Kafka (KRaft mode — no ZooKeeper)
-bin/kafka-server-start.sh config/kraft/server.properties
+# 1. Start infrastructure — Kafka (KRaft, no ZooKeeper), Kafka UI, and Redis together
+docker compose -f infrastructure/docker-compose.yml up -d
+# Kafka broker: localhost:9092 · Kafka UI: localhost:8085 · Redis: localhost:6379
 
-# 2. Start Redis
-docker compose up redis     # localhost:6379
-
-# 3. Start services in order — Config Server MUST be first
+# 2. Start services in order — Config Server MUST be first
 config-server      # 8888 — every other service fetches its config from here
 eureka-server      # 8761 — dashboard at http://localhost:8761
 auth-service       # 8081
