@@ -1,25 +1,29 @@
 package com.medinfo.audit.service;
 
 
-import com.medinfo.audit.DTO.CreateAuditLogRequestDTO;
 import com.medinfo.audit.entity.AuditLog;
-import com.medinfo.audit.Enum.AccessMethod;
 import com.medinfo.audit.repository.AuditRepository;
+import com.medinfo.common.enums.AccessMethod;
+import com.medinfo.common.events.AuditLogEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.UUID;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 
 @ExtendWith(MockitoExtension.class)
-public class AuditServiceTest {
+class AuditServiceTest {
 
     @Mock
     private AuditRepository auditRepository;
@@ -27,16 +31,20 @@ public class AuditServiceTest {
     @InjectMocks
     private AuditService auditService;
 
-    @Test
-    void createAuditLog_ShouldSaveAuditLogSuccessfully() {
-
-        // Arrange
-        CreateAuditLogRequestDTO request = CreateAuditLogRequestDTO.builder()
+    private AuditLogEvent buildEvent(UUID eventId) {
+        return AuditLogEvent.builder()
                 .userId(1L)
                 .ipAddress("127.0.0.1")
                 .userAgent("Postman")
                 .accessMethod(AccessMethod.URL)
+                .eventId(eventId)
                 .build();
+    }
+
+    @Test
+    void createAuditLog_ShouldSaveAuditLogSuccessfully() {
+        UUID eventId = UUID.randomUUID();
+        AuditLogEvent event = buildEvent(eventId);
 
         AuditLog savedAuditLog = AuditLog.builder()
                 .id(1L)
@@ -44,48 +52,52 @@ public class AuditServiceTest {
                 .ipAddress("127.0.0.1")
                 .userAgent("Postman")
                 .accessMethod(AccessMethod.URL)
+                .eventId(eventId)
                 .build();
 
-        when(auditRepository.save(any(AuditLog.class)))
-                .thenReturn(savedAuditLog);
+        when(auditRepository.existsByEventId(eventId)).thenReturn(false);
+        when(auditRepository.save(any(AuditLog.class))).thenReturn(savedAuditLog);
 
-        // Act
-        AuditLog result = auditService.createAuditLog(request);
+        AuditLog result = auditService.createAuditLog(event);
 
-        // Assert
         assertEquals(1L, result.getId());
         assertEquals(1L, result.getUserId());
         assertEquals("127.0.0.1", result.getIpAddress());
         assertEquals("Postman", result.getUserAgent());
         assertEquals(AccessMethod.URL, result.getAccessMethod());
+        assertEquals(eventId, result.getEventId());
 
-        // Verify
         verify(auditRepository).save(any(AuditLog.class));
     }
 
     @Test
+    void createAuditLog_ShouldIgnoreDuplicateEvent() {
+        UUID eventId = UUID.randomUUID();
+        AuditLogEvent event = buildEvent(eventId);
+
+        when(auditRepository.existsByEventId(eventId)).thenReturn(true);
+
+        AuditLog result = auditService.createAuditLog(event);
+
+        assertNull(result);
+        verify(auditRepository, never()).save(any(AuditLog.class));
+    }
+
+    @Test
     void createAuditLog_ShouldThrowException_WhenRepositoryFails() {
+        UUID eventId = UUID.randomUUID();
+        AuditLogEvent event = buildEvent(eventId);
 
-        // Arrange
-        CreateAuditLogRequestDTO request = CreateAuditLogRequestDTO.builder()
-                .userId(1L)
-                .ipAddress("127.0.0.1")
-                .userAgent("Postman")
-                .accessMethod(AccessMethod.URL)
-                .build();
-
+        when(auditRepository.existsByEventId(eventId)).thenReturn(false);
         when(auditRepository.save(any(AuditLog.class)))
                 .thenThrow(new RuntimeException("Database Error"));
 
-        // Act & Assert
         RuntimeException exception = assertThrows(
                 RuntimeException.class,
-                () -> auditService.createAuditLog(request)
+                () -> auditService.createAuditLog(event)
         );
 
         assertEquals("Database Error", exception.getMessage());
-
-        // Verify
         verify(auditRepository).save(any(AuditLog.class));
     }
 }

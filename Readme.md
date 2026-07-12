@@ -90,6 +90,7 @@ Java 21 · Spring Boot 3.5 · Spring Cloud (Gateway, Eureka, OpenFeign, Config S
 - **A cache key belongs to the service that owns the resource** — building Redis eviction exposed that `publicProfileId` was owned by Auth Service while Medical Service needed it to invalidate its own cache. Fixed by moving `publicProfileId` to Medical Service, while `fullName` deliberately stayed in Auth Service as identity data. See [Architecture.md](docs/ARCHITECTURE.md) for the full reasoning.
 - **Business logic unit tested in isolation** — mocked repositories, mocked Feign clients, mocked SecurityContext, mocked cache service. No DB, no HTTP, no Spring context. JaCoCo coverage on all three business services.
 - **Configuration is centralized, not fully removed** — every service's local config shrank to two lines (`spring.application.name`, `spring.config.import`); everything else moved to a dedicated `medinfo-config` Git repo, fetched via Spring Cloud Config Server at startup. This centralizes almost all runtime configuration, not literally all of it — those two lines still exist locally per service, by design. Trade-off named directly: this removes the bulk of the duplication but makes Config Server a new hard startup dependency for every other service.
+- **A 5-layer logging strategy, with an explicit rule for each layer** — Request (filter: method/URL/IP/status/timing) → Controller (almost nothing) → Service (⭐ most logs live here) → Repository (almost never) → Infrastructure (startup/connection events only). Log level is a signal, not decoration: `WARN` means "unexpected but handled correctly" (cache miss, duplicate Kafka event, retry attempt), `ERROR` means "actually failed" (Feign unreachable, event moved to DLT, unhandled exception).
 
 ---
 
@@ -102,6 +103,8 @@ These came from actually running the system, not from a tutorial:
 3. **Feign ErrorDecoder never fires on connection failures** — it only processes HTTP responses. A downed service throws `RetryableException` with no HTTP response at all, so decoder-based handling must be paired with service-level handling (→ 503). Long-term home: Resilience4j circuit breakers.
 4. **Redis deserialization failure — missing no-args constructor** — Jackson couldn't reconstruct cached DTOs (`Cannot construct instance... no default constructor`). Fixed by adding `@NoArgsConstructor` alongside the existing `@Builder`/`@AllArgsConstructor`.
 5. **Gateway never routed `/api/profile`** — discovered while verifying the Redis/ownership redesign end-to-end. `MedicalProfileController` worked when hit directly on port 8082 but 404'd through the Gateway, since the route predicate only matched `/api/medical/**`. Fixed by adding `/api/profile/**` to the route.
+6. **Spring Security filter registration order** — wiring in `RequestLoggingFilter` via `addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class)` failed at startup with `"The Filter class ... does not have a registered order"`, in both `auth-service` and `medical-service`. A custom filter has no implicit chain position — it only gets one once it's explicitly registered, and that has to happen *before* anything else references it as an anchor. Fixed by registering `jwtAuthenticationFilter`'s own position first.
+7. **A stale test nobody had compiled since Day 5** — `audit-service`'s `AuditServiceTest` still imported a `CreateAuditLogRequestDTO`/`Enum.AccessMethod` pair deleted back when the REST-based audit endpoint was replaced with Kafka. Never caught because nothing had run a full build across every module (vs. just the ones being actively edited) until this session. Rewritten against the real `createAuditLog(AuditLogEvent)` API.
 
 ---
 
@@ -159,8 +162,10 @@ All APIs via the Gateway: `http://localhost:8080/api/...` — Postman collection
 - [x] Redis caching (Cache-Aside, 10-min TTL) on the Emergency Profile API
 - [x] Architecture redesign — moved `publicProfileId` ownership from Auth Service to Medical Service
 - [x] Centralized configuration with Spring Cloud Config Server, backed by a dedicated `medinfo-config` Git repo
+- [x] 5-layer logging strategy — request filters (auth/medical/gateway), business-event logging across every service, Kafka retry/DLT logging, exception logging scoped to unexpected failures only
 - [ ] Cache-hit audit logging, circuit breaker for the Auth Feign call, `publicProfileId` backfill migration
 - [ ] Config Server HA, encrypted secrets, profile-specific (dev/qa/prod) config, refresh without restart
+- [ ] DEBUG-level logging (JWT claims, Redis values, Kafka payloads, Feign bodies) — deliberately deferred
 - [ ] Docker & Docker Compose (Redis already containerized)
 - [ ] CI/CD with GitHub Actions
 - [ ] Cloud deployment

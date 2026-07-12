@@ -34,12 +34,14 @@ public class EmergencyService {
     private final AuthClient authClient;
 
     public EmergencyProfileResponseDTO getEmergencyProfile(String publicProfileId, HttpServletRequest request){
+        log.info("Emergency Profile Requested. PublicProfileId={}", publicProfileId);
+
         EmergencyProfileResponseDTO cacheresponseDTO=cacheService.getEmergencyProfile(publicProfileId);
         if(cacheresponseDTO != null){
-            log.info("Cache HIT for {}", publicProfileId);
+            log.info("Cache HIT. PublicProfileId={}", publicProfileId);
             return  cacheresponseDTO;
         }
-        log.info("Cache MISS for {}", publicProfileId);
+        log.warn("Cache MISS. Loading from Database. PublicProfileId={}", publicProfileId);
 
 
         MedicalProfile medicalProfile =
@@ -56,6 +58,7 @@ public class EmergencyService {
         try {
             user = authClient.getUserById(userId);
         } catch (RetryableException ex) {
+            log.error("Feign call to Auth Service failed. UserId={}", userId, ex);
             throw new ServiceUnavailableException("Auth Service is not available");
         }
 

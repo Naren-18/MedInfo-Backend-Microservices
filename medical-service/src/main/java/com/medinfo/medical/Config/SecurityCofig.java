@@ -1,5 +1,6 @@
 package com.medinfo.medical.Config;
 
+import com.medinfo.medical.Filter.RequestLoggingFilter;
 import com.medinfo.medical.Security.JWTAuthenticationFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
@@ -17,6 +18,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @RequiredArgsConstructor
 public class SecurityCofig {
     private final JWTAuthenticationFilter jwtAuthenticationFilter;
+    private final RequestLoggingFilter requestLoggingFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws  Exception{
@@ -41,6 +43,7 @@ public class SecurityCofig {
                         .authenticated()
         );
         http.addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+        http.addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class);
         return http.build();
     }
 

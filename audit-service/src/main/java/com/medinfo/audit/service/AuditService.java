@@ -15,7 +15,7 @@ public class AuditService {
 
     public AuditLog createAuditLog(AuditLogEvent auditLogEvent){
         if(auditRepository.existsByEventId(auditLogEvent.getEventId())){
-            log.info("Duplicate event ignored: {}", auditLogEvent.getEventId());
+            log.warn("Duplicate Audit Event Ignored. EventId={}", auditLogEvent.getEventId());
             return null;
         }
         AuditLog auditLog=AuditLog.builder()
@@ -26,7 +26,9 @@ public class AuditService {
                 .eventId(auditLogEvent.getEventId())
                 .build();
 //        throw new RuntimeException("Testing Kafka Retry");
-        return auditRepository.save(auditLog);
+        AuditLog saved = auditRepository.save(auditLog);
+        log.info("Audit Log Saved. EventId={}", saved.getEventId());
+        return saved;
 
     }
 }

@@ -8,6 +8,7 @@ import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
 import com.medinfo.medical.cache.EmergencyProfileCacheService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
@@ -16,12 +17,14 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class MedicalProfileService {
     private final MedicalProfileRepository medicalProfileRepository;
     private final EmergencyProfileCacheService cacheService;
 
     public MedicalProfile createProfile(CreateMedicalProfileDTO createMedicalProfileDTO){
         Long userId=getCurrentUserId();
+        log.info("Creating Medical Profile. UserId={}", userId);
         if(medicalProfileRepository.existsByUserId(userId)){
             throw new ResourceAlreadyExistsException(
                     "Medical Profile",
@@ -44,10 +47,13 @@ public class MedicalProfileService {
                 .publicProfileId(UUID.randomUUID().toString())
                 .build();
 
-        return medicalProfileRepository.save(medicalProfile);
+        MedicalProfile saved = medicalProfileRepository.save(medicalProfile);
+        log.info("Medical Profile Created Successfully. UserId={}", userId);
+        return saved;
     }
     public MedicalProfile updateProfile(CreateMedicalProfileDTO createMedicalProfileDTO){
         Long userId=getCurrentUserId();
+        log.info("Updating Medical Profile. UserId={}", userId);
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
                         .orElseThrow(()->new ResourceNotFoundException(
                                 "Medical Profile",
@@ -98,6 +104,7 @@ public class MedicalProfileService {
 
     public String deleteProfile(){
         Long userId=getCurrentUserId();
+        log.info("Deleting Medical Profile. UserId={}", userId);
         MedicalProfile medicalProfile=medicalProfileRepository.findByUserId(userId)
                 .orElseThrow(()-> new ResourceNotFoundException("Medical Profile","userId",userId));
         medicalProfileRepository.delete(medicalProfile);

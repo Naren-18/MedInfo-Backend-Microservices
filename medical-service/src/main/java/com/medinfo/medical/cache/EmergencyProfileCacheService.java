@@ -25,12 +25,12 @@ public class EmergencyProfileCacheService {
     public void cacheEmergencyProfile(String publicProfileId,
                     EmergencyProfileResponseDTO response){
         String cacheKey=getCacheKey(publicProfileId);
-        log.info("Cached emergency profile {}", publicProfileId);
         redisTemplate.opsForValue().set(cacheKey,response, Duration.ofMinutes(10));
+        log.info("Emergency Profile Cached. PublicProfileId={}", publicProfileId);
     }
 
     public void evictEmergencyProfile(String publicProfileId){
-        log.info("Evicted cache for {}", publicProfileId);
         redisTemplate.delete(getCacheKey(publicProfileId));
+        log.info("Cache Evicted. PublicProfileId={}", publicProfileId);
     }
 }

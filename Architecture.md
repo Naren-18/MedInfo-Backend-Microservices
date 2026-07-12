@@ -1126,6 +1126,212 @@ Separation of configuration from application code · Single source of truth (Git
 
 ---
 
+## 📝 Logging — 5-Layer Strategy (Day 8)
+
+### The Model
+
+Logging was designed around five layers, each with a distinct responsibility
+— not "add logs everywhere," but "know exactly which layer a given log line
+belongs to":
+
+```
+Request → Controller → Service → Repository → Infrastructure
+```
+
+| Layer | Responsibility | Volume |
+|---|---|---|
+| 1. Request | Every incoming request/response — method, URL, IP, User-Agent, status, time taken | Highest priority |
+| 2. Controller | Almost nothing — controllers aren't where business happens | Minimal, avoid duplication |
+| 3. Service | Every important business action | ⭐ Most logs belong here |
+| 4. Repository | Almost never — Hibernate already logs SQL | Rare |
+| 5. Infrastructure | Startup/connection events (Redis connected, Kafka consumer started) | Sparse, high-signal |
+
+**Log levels as signal, not decoration:** `INFO` for normal business flow
+(user created, cache hit, Kafka event published), `WARN` for "unexpected but
+the application continues correctly" (cache miss, duplicate Kafka event,
+invalid login, retry attempt), `ERROR` for genuine failures (Feign
+unreachable, event moved to DLT, unhandled exception). Every call uses
+SLF4J `{}` placeholders — no string concatenation, no `System.out.println`.
+
+### Layer 1 — Request Logging
+
+`RequestLoggingFilter` (own copy in `auth-service` and `medical-service`,
+same pattern already used for Kafka event classes) extends
+`OncePerRequestFilter`:
+
+```java
+protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) {
+    long startTime = System.currentTimeMillis();
+    log.info("Incoming Request. Method={}, URL={}, IP={}, UserAgent={}", ...);
+    filterChain.doFilter(request, response);   // blocks until the full response is written
+    log.info("Completed Request. Status={}, TimeTakenMs={}", response.getStatus(), System.currentTimeMillis() - startTime);
+}
+```
+
+Wired into `SecurityCofig` via `http.addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class)`.
+
+### ⚠️ Real Issue Hit — Filter Registration Order
+
+```java
+// WRONG — fails at context startup
+http.addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class);
+http.addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+```
+Spring Security's `addFilterBefore(filter, anchorClass)` needs `anchorClass`'s
+position to already be known — either a standard Spring Security filter, or
+a custom filter already positioned by an earlier `addFilterBefore/After/At`
+call in the same chain build. `JWTAuthenticationFilter` is custom and has no
+built-in position, so line 1 above threw at startup:
+```
+The Filter class com.medinfo.auth.Security.JWTAuthenticationFilter does not have a registered order
+```
+**Fix:** swap the two lines — register `jwtAuthenticationFilter`'s position
+first, *then* `requestLoggingFilter` can validly sit before it. Same bug,
+same fix, hit independently in both `auth-service` and `medical-service`.
+Invisible to Mockito-based unit tests (no real `SecurityFilterChain` bean
+built); only caught by the `@SpringBootTest` integration tests.
+
+### Gateway — Reactive Logging
+
+Spring Cloud Gateway (WebFlux) can't use a servlet `Filter` — it needs a
+`GlobalFilter`:
+```java
+@Component
+public class LoggingGlobalFilter implements GlobalFilter, Ordered {
+    private static final Logger log = LoggerFactory.getLogger(LoggingGlobalFilter.class);
+
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        Route route = exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR);
+        log.info("Forwarding Request. Route={}, Path={}", route != null ? route.getId() : "unmatched", exchange.getRequest().getURI().getPath());
+        return chain.filter(exchange);
+    }
+    public int getOrder() { return Ordered.LOWEST_PRECEDENCE; }
+}
+```
+No Lombok on `gateway-service`'s classpath (first attempt with `@Slf4j`
+failed to compile) — uses a plain SLF4J `Logger` instead. `chain.filter(exchange)`
+returns a `Mono<Void>` *immediately*, a pipeline description, not a
+completed result — code after it runs before the actual proxying, unlike a
+blocking servlet filter, which is why this only logs *before* forwarding.
+`LOWEST_PRECEDENCE` ensures Gateway's own route-matching has already
+populated `GATEWAY_ROUTE_ATTR` by the time this filter reads it.
+
+### Layer 3 — Service Logging
+
+Business-action logs added across `AuthService` (registration/login,
+`WARN` on invalid password), `MedicalProfileService` / `EmergencyContactsService`
+(CRUD lifecycle, `WARN` on cross-user ownership violations), and
+`EmergencyService`:
+
+```java
+log.info("Emergency Profile Requested. PublicProfileId={}", publicProfileId);
+// Cache HIT → INFO · Cache MISS → WARN (about to do real DB + Feign work)
+try {
+    user = authClient.getUserById(userId);
+} catch (RetryableException ex) {
+    log.error("Feign call to Auth Service failed. UserId={}", userId, ex);
+    throw new ServiceUnavailableException("Auth Service is not available");
+}
+```
+`AuditEventProducer`'s stray `System.out.println("Publishing Event: " + event)`
+was replaced with `log.info("Publishing Audit Event. EventId={}, UserId={}", ...)`.
+
+### Kafka Producer/Consumer Logging — `KafkaConsumerConfig`
+
+The `DeadLetterPublishingRecoverer` bean was wrapped with a **decorator** —
+a new `ConsumerRecordRecoverer` lambda that logs `ERROR` and then delegates
+to the real recoverer:
+
+```java
+DeadLetterPublishingRecoverer recoverer = deadLetterPublishingRecoverer();
+ConsumerRecordRecoverer loggingRecoverer = (record, ex) -> {
+    Object value = record.value();
+    String eventId = (value instanceof AuditLogEvent e) ? String.valueOf(e.getEventId()) : "unknown";
+    log.error("Audit Event moved to DLT. EventId={}, Reason={}", eventId, ex.getMessage());
+    recoverer.accept(record, ex);
+};
+DefaultErrorHandler errorHandler = new DefaultErrorHandler(loggingRecoverer, fixedBackOff);
+errorHandler.setRetryListeners((record, ex, deliveryAttempt) ->
+        log.warn("Retry Attempt {}. Partition={}, Offset={}, Reason={}", deliveryAttempt, record.partition(), record.offset(), ex.getMessage())
+);
+```
+`instanceof AuditLogEvent e` (pattern matching, not a hard cast) guards
+against the case where deserialization itself failed and `record.value()`
+isn't actually the expected type — a malformed record can't throw a
+`ClassCastException` inside the error-handling path itself.
+
+`RetryListener` and the recoverer are two separate extension points:
+`RetryListener.failedDelivery(...)` fires **after every failed attempt**
+(`WARN`); the recoverer fires **exactly once**, after retries are exhausted
+(`ERROR`). A poison message now produces `WARN × attempts` followed by one
+terminal `ERROR`, not one generic catch-all log line.
+
+`AuditEventConsumer` gained an `@EventListener(ApplicationReadyEvent.class)`
+startup log (`Audit Consumer Started`) and moved its "Received Audit Event"
+log to *before* processing, so an event's arrival is visible even if it
+later fails and enters the retry/DLT path above. `AuditService` distinguishes
+`WARN` (duplicate event, idempotency guard doing its job) from `INFO`
+(`Audit Log Saved`, logged after `save()` actually returns).
+
+### Exception Logging
+
+Both `GlobalExceptionHandler`s log `ERROR` with full stack trace, but only
+in the generic `Exception` catch-all — never for expected business
+exceptions (`ResourceNotFoundException`, `UnauthorizedException`, etc.),
+which would otherwise drown real problems in noise on every bad request:
+```java
+log.error("Unexpected error occurred. Path={}", request.getRequestURI(), ex);
+```
+SLF4J treats a trailing `Throwable` argument specially — every major
+binding prints the full stack trace after the formatted message, without
+needing a second `{}` placeholder for it.
+
+### ⚠️ Real Issue Hit — Stale Test From the Day 5 Kafka Migration
+
+Running the full suite for the first time across every module (not just the
+ones being actively edited) surfaced `audit-service`'s `AuditServiceTest.java`
+failing to compile — it imported `com.medinfo.audit.DTO.CreateAuditLogRequestDTO`
+and `com.medinfo.audit.Enum.AccessMethod`, packages that no longer exist.
+The test predated the Kafka migration and was written against the old
+`POST /api/audit/log` REST signature, deleted back on Day 5 — nothing had
+run this test module in a full build since. Rewritten against the real
+`createAuditLog(AuditLogEvent)` signature, covering save / duplicate-ignore
+/ repository-failure.
+
+### Design Principles Applied
+
+Layered responsibility, no cross-layer duplication · Log level as signal
+(`WARN` = handled correctly, `ERROR` = actual failure) · Structured,
+parameterized logging throughout · Decorator pattern for cross-cutting
+concerns (DLT logging wraps, doesn't modify, the real recoverer) ·
+Defensive logging in error paths (`instanceof` over hard casts)
+
+### Key Learnings
+
+- Filter ordering in Spring Security is relative and declarative — a custom
+  filter has no implicit position; it only gets one when explicitly
+  registered, and code order determines whether a later `addFilterBefore`
+  referencing it succeeds or throws at startup.
+- This class of bug is invisible to mocked unit tests and only surfaces in
+  tests that build the real Spring context.
+- Reactive (`GlobalFilter`/`Mono`) and blocking (`OncePerRequestFilter`)
+  filters have fundamentally different control flow — code "after"
+  `chain.filter(...)` means different things in each.
+- `RetryListener` and a terminal recoverer are different extension points
+  in `DefaultErrorHandler` — modeling "WARN per retry, ERROR once on DLT"
+  required using both, not just wrapping the recoverer.
+- A test suite is only as trustworthy as its last real full-module compile
+  — a broken test can sit undetected indefinitely if nothing ever builds
+  that module end to end.
+
+### Next Phase (Not Yet Done)
+
+- **DEBUG-level logging** — JWT claims, Redis values, Kafka payloads, Feign bodies, SQL parameters. Normally disabled in production; lower priority than getting INFO/WARN/ERROR right first.
+- **Cache-hit audit logging** — still open from Day 6; a cache hit is still a real access to someone's emergency data.
+- **No ELK/Loki/Zipkin** — deliberately out of scope. Real operational complexity, without teaching much more about *what* to log or *how* to structure it, which was the actual goal here.
+
+---
+
 ## 🧪 Testing (Day 4)
 
 All three business services carry **JUnit 5 + Mockito** unit test suites with **JaCoCo** coverage reporting.
@@ -1998,6 +2204,11 @@ audit_db
 - **Configuration duplication is invisible at 2–3 services and becomes a real cost as the count grows.** Config Server centralizes it, but doesn't remove the dependency — it relocates it: every service now needs Config Server up before it can read its own port. (Day 7)
 - **Naming conventions can replace explicit wiring, at the cost of silent failure on typos.** `spring.application.name` matching `{name}.yml` in the config repo is what makes the Config Server lookup automatic — get the name wrong and a service just doesn't get its config, with no obvious pointer to why.
 - **Externalizing configuration doesn't externalize the risk of committing secrets.** JWT secrets and DB credentials moved out of each service's local file, but into a Git repo — still plaintext, still a real gap until encryption at rest is added.
+- **A layered logging model only works if you also decide what *not* to log at each layer.** Skipping the Layer 2 (controller) log for the Emergency API wasn't an oversight — Layer 1 (request filter) and Layer 3 (service) already covered the same event; a third near-identical line would have been noise, not signal. (Day 8)
+- **Log level is a signal about what happened, not a formatting choice.** `WARN` means "unexpected but handled correctly" (cache miss, duplicate Kafka event, retry attempt); `ERROR` means "actually failed" (Feign unreachable, event moved to DLT). Getting this distinction right is what makes logs searchable/alertable later — a system that logs everything at `INFO` or `ERROR` has no signal at all.
+- **Spring Security filter ordering is declarative, not positional.** A custom filter has no implicit place in the chain — it only gets one the moment it's explicitly registered via `addFilterBefore/After/At`, and that registration has to happen *before* anything else tries to reference it as an anchor. Get the call order wrong and the app fails at startup, not silently.
+- **`RetryListener` and a terminal recoverer solve different problems.** One observes every failed delivery attempt; the other fires exactly once, after retries are exhausted. Modeling "WARN per retry, ERROR once on DLT" needed both, not one wrapped in the other.
+- **A module nobody runs a full build against can silently rot.** `audit-service`'s test suite had been broken since the Day 5 Kafka migration — nothing caught it until a full build across every module, not just the ones being actively edited, was run for the first time.
 
 ---
 
@@ -2097,27 +2308,44 @@ audit_db
 - [ ] Docker & Docker Compose for the remaining services (Redis itself is already containerized)
 - [ ] CI/CD with GitHub Actions
 - [ ] Cloud Deployment
+- [x] Designed a 5-layer logging model (Request → Controller → Service → Repository → Infrastructure) with explicit log-level rules
+- [x] Implemented `RequestLoggingFilter` in `auth-service` and `medical-service` (incoming/completed request logs with timing)
+- [x] Implemented `LoggingGlobalFilter` in `gateway-service` (reactive route/path forwarding log)
+- [x] Added business-event logging across `AuthService`, `MedicalProfileService`, `EmergencyContactsService`, `EmergencyService`
+- [x] Reworded `EmergencyProfileCacheService` logs to match cache-aside vocabulary (Cached / Evicted)
+- [x] Replaced a raw `System.out.println` in `AuditEventProducer` with structured logging
+- [x] Added duplicate-ignored (WARN) and saved (INFO) logs to `AuditService`
+- [x] Added `ApplicationReadyEvent` startup log and pre-processing "Received" log to `AuditEventConsumer`
+- [x] Wrapped `DeadLetterPublishingRecoverer` with a logging decorator (ERROR on DLT) and added `RetryListener`-based WARN logging per retry attempt
+- [x] Added ERROR-level exception logging (with stack trace) to both `GlobalExceptionHandler`s, scoped only to unexpected exceptions
+- [x] Fixed a Spring Security filter-registration-order bug in both `auth-service` and `medical-service`
+- [x] Fixed a missing-Lombok compile failure in `gateway-service`
+- [x] Rewrote `audit-service`'s stale, non-compiling `AuditServiceTest` (dead since the Day 5 Kafka migration)
+- [x] Verified full build + 46 passing tests across `auth-service`, `medical-service`, and `audit-service`
+- [ ] DEBUG-level logging (JWT claims, Redis values, Kafka payloads, Feign bodies, SQL params)
+- [ ] Cache-hit audit logging (still open from Day 6)
+- [ ] Log aggregation (ELK/Loki/Zipkin) — deliberately deferred, not a gap
 
 ---
 
 ## 📅 Current Status
 
-**Six applications + Kafka broker + Redis running, config centralized.** The architecture is now genuinely event-driven where it should be, synchronous where it must be, cached where traffic demands it, reliable where failures are inevitable, each service owns exactly the identifiers it needs, and configuration is a single Git-backed source of truth instead of duplicated per service:
+**Six applications + Kafka broker + Redis running, config centralized, every layer now observable.** The architecture is genuinely event-driven where it should be, synchronous where it must be, cached where traffic demands it, reliable where failures are inevitable, each service owns exactly the identifiers it needs, configuration is a single Git-backed source of truth instead of duplicated per service, and every request, cache decision, Kafka event, and failure now leaves a structured, level-appropriate log line behind it:
 
 ```
 Config Server (8888) → { Auth, Medical, Audit, Gateway, Eureka } — config fetched at startup
-Client → Gateway → Eureka → { AUTH, MEDICAL }
-Medical → Redis                                              (synchronous, in-process — cache-aside)
-Medical → Feign → Auth  (fullName only)                       (synchronous — narrowed scope, Day 6)
+Client → Gateway (LoggingGlobalFilter) → Eureka → { AUTH, MEDICAL } (RequestLoggingFilter on each)
+Medical → Redis                                              (synchronous, in-process — cache-aside, HIT=INFO/MISS=WARN)
+Medical → Feign → Auth  (fullName only)                       (synchronous — narrowed scope, Day 6; failure=ERROR)
 Medical → Kafka → emergency-access-events → Audit             (asynchronous — fire and forget, on cache miss)
-Audit  → Retry (3×) → DeadLetterPublishingRecoverer → emergency-access-events.DLT   (on failure)
-Audit  → existsByEventId() → ignore | save                    (on redelivery)
+Audit  → Retry (3×, WARN per attempt) → DeadLetterPublishingRecoverer → emergency-access-events.DLT (ERROR, on failure)
+Audit  → existsByEventId() → ignore (WARN) | save (INFO)      (on redelivery)
 
 mvn clean test → JaCoCo HTML report per service
 ```
 
 The failure tests proved the design: Audit Service down → emergency response unaffected → events buffered and consumed on recovery. Poison message → 3 retries → DLT, partition unblocked, client response unaffected throughout. Duplicate delivery → exactly one audit record (idempotent consumer). Redis eviction on update → next read always fresh from PostgreSQL. Auth Service down → only the `fullName` field is affected, not the whole emergency lookup. Config Server verified end to end for every service's `GET /{application-name}/default` lookup.
 
-The strongest story from Day 6 isn't the caching itself — it's that implementing cache eviction exposed a pre-existing ownership bug (`publicProfileId` living in Auth Service when Medical Service needed it to invalidate its own cache) that had been latent in the architecture since Day 1. The Day 7 story is the trade-off, stated plainly: centralizing configuration removes duplication, but makes Config Server itself a new hard startup dependency for every other service — worth naming unprompted, not just presenting as a strict win.
+The strongest story from Day 6 isn't the caching itself — it's that implementing cache eviction exposed a pre-existing ownership bug (`publicProfileId` living in Auth Service when Medical Service needed it to invalidate its own cache) that had been latent in the architecture since Day 1. The Day 7 story is the trade-off, stated plainly: centralizing configuration removes duplication, but makes Config Server itself a new hard startup dependency for every other service — worth naming unprompted, not just presenting as a strict win. The Day 8 story is that adding logging wasn't just additive — verifying it end to end (via the existing `@SpringBootTest` suites) caught two real bugs that would otherwise have shipped: a Spring Security filter-chain misconfiguration in both `auth-service` and `medical-service`, and a `audit-service` test module that had been silently broken since Day 5.
 
 Next milestone: **Day 8 — Docker & Docker Compose** for the remaining services (Redis is already containerized), followed by CI/CD with GitHub Actions and cloud deployment 🚀

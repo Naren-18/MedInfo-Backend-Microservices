@@ -2,8 +2,10 @@ package com.medinfo.audit.config;
 
 import com.medinfo.common.constants.KafkaTopics;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
@@ -22,6 +24,7 @@ import java.util.Map;
 
 @Configuration
 @RequiredArgsConstructor
+@Slf4j
 public class KafkaConsumerConfig {
     private final KafkaTemplate<String,AuditLogEvent> kafkaTemplate;
 
@@ -77,10 +80,25 @@ public class KafkaConsumerConfig {
                 3L        // Retry 3 times
         );
 
-        return new DefaultErrorHandler(
-                deadLetterPublishingRecoverer(),
+        DeadLetterPublishingRecoverer recoverer = deadLetterPublishingRecoverer();
+        ConsumerRecordRecoverer loggingRecoverer = (record, ex) -> {
+            Object value = record.value();
+            String eventId = (value instanceof AuditLogEvent auditLogEvent)
+                    ? String.valueOf(auditLogEvent.getEventId())
+                    : "unknown";
+            log.error("Audit Event moved to DLT. EventId={}, Reason={}", eventId, ex.getMessage());
+            recoverer.accept(record, ex);
+        };
+
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(
+                loggingRecoverer,
                 fixedBackOff
         );
+        errorHandler.setRetryListeners((record, ex, deliveryAttempt) ->
+                log.warn("Retry Attempt {}. Partition={}, Offset={}, Reason={}",
+                        deliveryAttempt, record.partition(), record.offset(), ex.getMessage())
+        );
+        return errorHandler;
     }
 
     @Bean

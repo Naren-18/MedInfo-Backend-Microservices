@@ -10,6 +10,7 @@ import com.medinfo.auth.Exception.UnauthorizedException;
 import com.medinfo.auth.Repository.UserRepository;
 import com.medinfo.auth.Security.JWTService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -18,6 +19,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
@@ -25,6 +27,7 @@ public class AuthService {
 
 
     public String register(RegisterRequestDTO registerRequestDTO){
+        log.info("Registration requested. Email={}", registerRequestDTO.getEmail());
         if(userRepository.existsByEmail(registerRequestDTO.getEmail())){
             throw new ResourceAlreadyExistsException(
                     "User",
@@ -39,17 +42,22 @@ public class AuthService {
                 .created_at(LocalDateTime.now())
                 .build();
         userRepository.save(user);
+        log.info("User registered successfully. UserId={}", user.getId());
         return "User Registration Completed";
     }
     public String login(LoginRequestDTO loginRequestDTO){
+        log.info("Login requested. Email={}", loginRequestDTO.getEmail());
         User user=userRepository.findByEmail(loginRequestDTO.getEmail())
                 .orElseThrow(()->new UnauthorizedException("Invalid Credentials"));
         boolean result=passwordEncoder.matches(loginRequestDTO.getPassword(),user.getPassword());
         if(!result){
+            log.warn("Invalid login attempt. Email={}", loginRequestDTO.getEmail());
             throw new UnauthorizedException("Password Invalid");
         }
 
-        return jwtService.generateToken(user);
+        String token = jwtService.generateToken(user);
+        log.info("JWT generated. UserId={}", user.getId());
+        return token;
     }
 
     public UserBasicResponseDTO getUserById(Long userId) {
