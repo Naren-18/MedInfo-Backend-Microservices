@@ -32,3 +32,5 @@ jobs:
 
       - name: Build Project
         run: mvn clean verify -DskipTests
+      - name: Build Docker Images
+        run: docker compose -f infrastructure/docker-compose.yml build
