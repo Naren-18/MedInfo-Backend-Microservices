@@ -10,4 +10,6 @@ spring:
       server:
         git:
           uri: https://github.com/Naren-18/medinfo-config.git
-          default-label: main
+          default-label: docker
+          clone-on-start: true
+          force-pull: true

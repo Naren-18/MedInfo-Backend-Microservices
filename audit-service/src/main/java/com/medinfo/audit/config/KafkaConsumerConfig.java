@@ -21,13 +21,15 @@ import org.springframework.kafka.support.serializer.JsonDeserializer;
 
 import java.util.HashMap;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 
 @Configuration
 @RequiredArgsConstructor
 @Slf4j
 public class KafkaConsumerConfig {
     private final KafkaTemplate<String,AuditLogEvent> kafkaTemplate;
-
+    @Value("${spring.kafka.bootstrap-servers}")
+    private String bootstrapServers;
 
     @Bean
     public ConsumerFactory<String,AuditLogEvent> consumerFactory(){
@@ -37,7 +39,7 @@ public class KafkaConsumerConfig {
         Map<String,Object> config=new HashMap<>();
         config.put(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
-                "localhost:9092"
+                bootstrapServers
         );
         config.put(
                 ConsumerConfig.GROUP_ID_CONFIG,

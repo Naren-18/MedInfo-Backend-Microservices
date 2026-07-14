@@ -37,7 +37,8 @@ public class SecurityCofig {
                         .requestMatchers(
                                 "/api/auth/**",
                                 "/api/emergency/**",
-                                "/h2-console/**"
+                                "/h2-console/**",
+                                "/actuator/health"
                         ).permitAll()
                         .anyRequest()
                         .authenticated()

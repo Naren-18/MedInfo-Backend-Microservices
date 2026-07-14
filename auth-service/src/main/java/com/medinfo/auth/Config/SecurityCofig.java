@@ -38,7 +38,8 @@ public class SecurityCofig {
                                 "/api/auth/login",
                                 "/api/auth/register",
                                 "/api/auth/internal/**",
-                                "/h2-console/**"
+                                "/h2-console/**",
+                                "/actuator/health"
                         ).permitAll()
                         .anyRequest()
                         .authenticated()
