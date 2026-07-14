@@ -54,6 +54,12 @@ services:
     restart: unless-stopped
     networks:
       - medinfo-network
+    environment:
+      AUTH_DB_URL: ${AUTH_DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/actuator/health"]
       interval: 10s
@@ -81,6 +87,12 @@ services:
     restart: unless-stopped
     networks:
       - medinfo-network
+    environment:
+      MEDICAL_DB_URL: ${MEDICAL_DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
       interval: 10s
@@ -106,6 +118,10 @@ services:
     restart: unless-stopped
     networks:
       - medinfo-network
+    environment:
+      AUDIT_DB_URL: ${AUDIT_DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
       interval: 10s
@@ -135,6 +151,9 @@ services:
     restart: unless-stopped
     networks:
       - medinfo-network
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
       interval: 10s
