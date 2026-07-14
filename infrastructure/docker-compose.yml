@@ -3,7 +3,7 @@ services:
     build:
       context: ../config-server
       dockerfile: Dockerfile
-    image: config-server:latest
+    image: naren487/config-server:latest
     container_name: config-server
     ports:
       - "8888:8888"
@@ -21,7 +21,7 @@ services:
     build:
       context: ../eureka-server
       dockerfile: Dockerfile
-    image: eureka-server:latest
+    image:  naren487/eureka-server:latest
     container_name: eureka-server
     ports:
       - "8761:8761"
@@ -42,7 +42,7 @@ services:
     build:
       context: ../auth-service
       dockerfile: Dockerfile
-    image: auth-service:latest
+    image: naren487/auth-service:latest
     container_name: auth-service
     ports:
       - "8081:8081"
@@ -71,7 +71,7 @@ services:
     build:
       context: ../medical-service
       dockerfile: Dockerfile
-    image: medical-service:latest
+    image: naren487/medical-service:latest
     container_name: medical-service
     ports:
       - "8082:8082"
@@ -104,7 +104,7 @@ services:
     build:
       context: ../audit-service
       dockerfile: Dockerfile
-    image: audit-service:latest
+    image: naren487/audit-service:latest
     container_name: audit-service
     ports:
       - "8083:8083"
@@ -133,7 +133,7 @@ services:
     build:
       context: ../gateway-service
       dockerfile: Dockerfile
-    image: gateway-service:latest
+    image: naren487/gateway-service:latest
     container_name: gateway-service
     ports:
       - "8080:8080"
