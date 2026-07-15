@@ -19,7 +19,7 @@ public class EmergencyContactsController {
 
 
     @PostMapping
-    public ResponseEntity<String> createContacts(@Valid @RequestBody EContactsDTO EContactsDTO){
+    public ResponseEntity<EContactsDTO> createContacts(@Valid @RequestBody EContactsDTO EContactsDTO){
         return ResponseEntity.ok(
                 emergencyContactsService.createContact(EContactsDTO)
         );
@@ -33,7 +33,7 @@ public class EmergencyContactsController {
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<String> updateContacts(@Valid @PathVariable Long id,@RequestBody EContactsDTO eContactsDTO){
+    public ResponseEntity<EContactsDTO> updateContacts(@Valid @PathVariable Long id,@RequestBody EContactsDTO eContactsDTO){
         return ResponseEntity.ok(
                 emergencyContactsService.updateContact(id,eContactsDTO)
         );

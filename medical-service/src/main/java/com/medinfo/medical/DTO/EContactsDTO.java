@@ -10,6 +10,7 @@ import lombok.*;
 @NoArgsConstructor
 @AllArgsConstructor
 public class EContactsDTO {
+    private Long id;
     @NotBlank
     private String name;
     @NotBlank

@@ -84,6 +84,7 @@ public class EmergencyService {
                 .emergencyContacts(emergencyContacts.stream()
                         .map(contact ->
                                 EContactsDTO.builder()
+                                        .id(contact.getId())
                                         .name(contact.getName())
                                         .relationship(contact.getRelationship())
                                         .phoneNumber(contact.getPhoneNumber())
