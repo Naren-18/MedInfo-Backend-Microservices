@@ -6,7 +6,7 @@ In a medical emergency, first responders scan a QR code to instantly access crit
 
 > 📐 Deep-dive documentation: **[Architecture.md](Architecture.md)** — full configs, structure trees, API contracts, and testing details.
 
----
+---   
 
 ## 🏗️ Architecture
 
