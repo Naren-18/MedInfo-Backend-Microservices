@@ -11,28 +11,41 @@ In a medical emergency, first responders scan a QR code to instantly access crit
 ## 🏗️ Architecture
 
 ```
-                     Config Server (8888) ── medinfo-config (Git repo)
-                              │  fetches config for every service below
-                              ▼
-                           Client
-                              │
-                              ▼
-                     API Gateway (8080)
-                              │
-                       Eureka Discovery
-                              │
-        ┌──────────────┬──────────────┐
-        ▼              ▼
-   AUTH SERVICE   MEDICAL SERVICE      AUDIT SERVICE
-     (8081)          (8082)              (8083)
-        ▲              │  │ ▲               ▲
-        └────Feign─────┘  │ └─Redis (6379)  │
-      (fullName only)     │  Cache-Aside    │
-                          │  Kafka topic    │
-                          └─► emergency- ───┘
-                             access-events
+                                  GitHub
+                                     │
+                                     ▼
+                            GitHub Actions (CI)
+                                     │
+                                     ▼
+                                Docker Hub
+                                     │
+                                     ▼
+                               Railway Cloud
+                                     │
+                                     ▼
+                           API Gateway (8080)
+                                     │
+                              Eureka Discovery
+                                     │
+        ┌────────────────────────────┼────────────────────────────┐
+        ▼                            ▼                            ▼
+  AUTH SERVICE                MEDICAL SERVICE             AUDIT SERVICE
+      │                              │                         │
+      │                              │                         │
+      ▼                              ▼                         ▼
+  PostgreSQL                    PostgreSQL               PostgreSQL
+    (Neon)                        (Neon)                   (Neon)
+                                      │
+                       ┌──────────────┴──────────────┐
+                       ▼                             ▼
+                 Redis Cache                    Kafka Broker
 
-   auth_db         medical_db          audit_db          Redis
+                    ▲
+                    │
+             Config Server
+                    │
+                    ▼
+        medinfo-config (Git Repository)
 ```
 
 **Emergency Profile request, in actual order** (the diagram above shows topology, not sequence — Redis is always checked first):
@@ -72,7 +85,27 @@ QR Scan → Redis GET
 
 ## ⚙️ Tech Stack
 
-Java 21 · Spring Boot 3.5 · Spring Cloud (Gateway, Eureka, OpenFeign, Config Server) · Spring Security + JWT · Apache Kafka (KRaft) · Redis · PostgreSQL (Neon) · JUnit 5 + Mockito + JaCoCo · Maven
+- Java 21
+- Spring Boot 3.5
+- Spring Cloud
+  - Config Server
+  - Eureka Server
+  - Gateway
+  - OpenFeign
+  - LoadBalancer
+- Spring Security + JWT
+- PostgreSQL (Neon)
+- Redis
+- Apache Kafka (KRaft)
+- Docker
+- Docker Compose
+- GitHub Actions
+- Docker Hub
+- Railway
+- JUnit 5
+- Mockito
+- JaCoCo
+- Maven
 
 ---
 
@@ -94,6 +127,84 @@ Java 21 · Spring Boot 3.5 · Spring Cloud (Gateway, Eureka, OpenFeign, Config S
 
 ---
 
+## ☁️ Production Deployment
+
+The entire platform is deployed to Railway using Docker images published automatically by GitHub Actions.
+
+**Deployment Architecture:**
+```
+Git Push
+      │
+      ▼
+GitHub Actions
+      │
+      ▼
+Build & Test
+      │
+      ▼
+Docker Image Build
+      │
+      ▼
+Push Images to Docker Hub
+      │
+      ▼
+Railway Deployment
+```
+
+**Production services include:**
+- Config Server
+- Eureka Server
+- API Gateway
+- Auth Service
+- Medical Service
+- Audit Service
+- Redis
+- Kafka
+- PostgreSQL (Neon)
+
+Configuration is fully externalized using Railway Environment Variables and Spring Cloud Config Server.
+
+---
+
+## 🐳 Docker
+
+Every Spring Boot service is containerized using Docker.
+
+The local development environment is orchestrated through Docker Compose.
+
+**Containers include:**
+- Config Server
+- Eureka Server
+- Gateway
+- Auth Service
+- Medical Service
+- Audit Service
+- Kafka
+- Kafka UI
+- Redis
+
+Health checks ensure services only start after their dependencies become healthy.
+
+---
+
+## ⚙️ Continuous Integration
+
+GitHub Actions automatically performs:
+
+✔ Maven Build
+
+✔ Unit Tests
+
+✔ Docker Image Build
+
+✔ Docker Hub Push
+
+Every commit to the main branch produces production-ready Docker images.
+
+Images are tagged using `latest` and the Git SHA.
+
+---
+
 ## 🔧 Real Issues Hit & Fixed
 
 These came from actually running the system, not from a tutorial:
@@ -105,6 +216,22 @@ These came from actually running the system, not from a tutorial:
 5. **Gateway never routed `/api/profile`** — discovered while verifying the Redis/ownership redesign end-to-end. `MedicalProfileController` worked when hit directly on port 8082 but 404'd through the Gateway, since the route predicate only matched `/api/medical/**`. Fixed by adding `/api/profile/**` to the route.
 6. **Spring Security filter registration order** — wiring in `RequestLoggingFilter` via `addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class)` failed at startup with `"The Filter class ... does not have a registered order"`, in both `auth-service` and `medical-service`. A custom filter has no implicit chain position — it only gets one once it's explicitly registered, and that has to happen *before* anything else references it as an anchor. Fixed by registering `jwtAuthenticationFilter`'s own position first.
 7. **A stale test nobody had compiled since Day 5** — `audit-service`'s `AuditServiceTest` still imported a `CreateAuditLogRequestDTO`/`Enum.AccessMethod` pair deleted back when the REST-based audit endpoint was replaced with Kafka. Never caught because nothing had run a full build across every module (vs. just the ones being actively edited) until this session. Rewritten against the real `createAuditLog(AuditLogEvent)` API.
+
+**Docker Networking**
+
+8. **Kafka connection failure after Dockerization** — Producer and Consumer were initially configured using `localhost:9092`. Inside Docker, each container has its own `localhost`, so the broker was unreachable from other containers. Fixed by moving the Kafka bootstrap servers to centralized configuration and injecting them via `@Value` instead of hardcoding.
+
+**Docker Health Checks**
+
+9. **Incorrect startup ordering** — Docker Compose initially used `service_started`, so services attempted to connect before their dependencies' Spring Boot applications had actually finished starting. Fixed by introducing Docker health checks against `/actuator/health` and switching dependencies to `condition: service_healthy`.
+
+**GitHub Actions**
+
+10. **Docker build failed in CI** — the Config Server JAR could not be copied during the Docker build. Root cause: Config Server was missing from the parent Maven reactor. Fixed by adding the Config Server module to the parent `pom.xml`.
+
+**Railway Deployment**
+
+11. **Gateway returned HTTP 500** — the Gateway failed to resolve services using `lb://AUTH-SERVICE`. Root cause: Gateway was missing Spring Cloud LoadBalancer. Fixed by adding `spring-cloud-starter-loadbalancer`, which restored Eureka-based service discovery.
 
 ---
 
@@ -149,26 +276,34 @@ All APIs via the Gateway: `http://localhost:8080/api/...` — Postman collection
 
 ## ✅ Progress
 
-- [x] Monolith → microservices migration (auth, medical domains)
-- [x] Database-per-service (PostgreSQL via Neon)
-- [x] JWT with custom claims + decentralized validation
-- [x] OpenFeign inter-service communication + centralized exception framework
-- [x] Eureka service discovery — zero hardcoded URLs
-- [x] Spring Cloud Gateway — single entry point
-- [x] Audit Service extraction (bounded context)
-- [x] Unit testing (JUnit 5 + Mockito) + JaCoCo coverage
-- [x] Event-driven audit logging with Kafka — synchronous Feign path removed
-- [x] Kafka reliability — retry with backoff, Dead Letter Topic, idempotent consumer
-- [x] Redis caching (Cache-Aside, 10-min TTL) on the Emergency Profile API
-- [x] Architecture redesign — moved `publicProfileId` ownership from Auth Service to Medical Service
-- [x] Centralized configuration with Spring Cloud Config Server, backed by a dedicated `medinfo-config` Git repo
-- [x] 5-layer logging strategy — request filters (auth/medical/gateway), business-event logging across every service, Kafka retry/DLT logging, exception logging scoped to unexpected failures only
-- [ ] Cache-hit audit logging, circuit breaker for the Auth Feign call, `publicProfileId` backfill migration
-- [ ] Config Server HA, encrypted secrets, profile-specific (dev/qa/prod) config, refresh without restart
-- [ ] DEBUG-level logging (JWT claims, Redis values, Kafka payloads, Feign bodies) — deliberately deferred
-- [ ] Docker & Docker Compose (Redis already containerized)
-- [ ] CI/CD with GitHub Actions
-- [ ] Cloud deployment
+- [x] Monolith → Microservices
+- [x] Database per Service
+- [x] JWT Authentication
+- [x] Spring Cloud Gateway
+- [x] Eureka Service Discovery
+- [x] OpenFeign
+- [x] Kafka Event-Driven Architecture
+- [x] Kafka Retry + Dead Letter Topic
+- [x] Redis Cache (Cache Aside)
+- [x] Config Server
+- [x] Docker
+- [x] Docker Compose
+- [x] Docker Health Checks
+- [x] Externalized Configuration (.env + Railway Variables)
+- [x] GitHub Actions CI
+- [x] Docker Hub Image Publishing
+- [x] Railway Cloud Deployment
+- [x] Centralized Logging
+- [x] Unit Testing + JaCoCo
+
+### 🚧 Next Improvements
+
+- [ ] Resilience4j Circuit Breaker
+- [ ] Prometheus + Grafana Monitoring
+- [ ] Distributed Tracing (Zipkin/OpenTelemetry)
+- [ ] ELK / Loki Centralized Logs
+- [ ] Automated CD to Railway
+- [ ] Swagger / OpenAPI
 
 ---
 
