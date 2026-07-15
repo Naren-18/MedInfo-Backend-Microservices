@@ -3,6 +3,7 @@ name: MedInfo CI
 on:
   push:
     branches:
+      - main
       - docker
 
   pull_request:
