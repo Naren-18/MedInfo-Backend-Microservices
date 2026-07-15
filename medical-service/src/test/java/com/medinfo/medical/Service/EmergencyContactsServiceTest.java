@@ -72,12 +72,15 @@ class EmergencyContactsServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void createContact_ShouldSaveAndReturnSuccessMessage() {
+    void createContact_ShouldSaveAndReturnCreatedContact() {
         when(emergencyContactsRepository.save(any(EmergencyContacts.class))).thenReturn(buildContact());
 
-        String result = emergencyContactsService.createContact(buildContactDTO());
+        EContactsDTO result = emergencyContactsService.createContact(buildContactDTO());
 
-        assertEquals("Emergency Contact Created Successfully ", result);
+        assertEquals(1L, result.getId());
+        assertEquals("Jane Doe", result.getName());
+        assertEquals("Sister", result.getRelationship());
+        assertEquals("9876543210", result.getPhoneNumber());
         verify(emergencyContactsRepository).save(any(EmergencyContacts.class));
     }
 
@@ -92,6 +95,7 @@ class EmergencyContactsServiceTest {
         List<EContactsDTO> result = emergencyContactsService.getContacts();
 
         assertEquals(1, result.size());
+        assertEquals(1L, result.get(0).getId());
         assertEquals("Jane Doe", result.get(0).getName());
         assertEquals("Sister", result.get(0).getRelationship());
         assertEquals("9876543210", result.get(0).getPhoneNumber());
@@ -152,7 +156,7 @@ class EmergencyContactsServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void updateContact_ShouldUpdateFieldsAndReturnSuccessMessage() {
+    void updateContact_ShouldUpdateFieldsAndReturnUpdatedContact() {
         EmergencyContacts existing = buildContact();
         when(emergencyContactsRepository.findById(1L)).thenReturn(Optional.of(existing));
         when(emergencyContactsRepository.save(any(EmergencyContacts.class))).thenReturn(existing);
@@ -163,9 +167,12 @@ class EmergencyContactsServiceTest {
                 .phoneNumber("1234567890")
                 .build();
 
-        String result = emergencyContactsService.updateContact(1L, updatedDTO);
+        EContactsDTO result = emergencyContactsService.updateContact(1L, updatedDTO);
 
-        assertEquals("Emergency Contact Updated", result);
+        assertEquals(1L, result.getId());
+        assertEquals("Updated Name", result.getName());
+        assertEquals("Brother", result.getRelationship());
+        assertEquals("1234567890", result.getPhoneNumber());
         assertEquals("Updated Name", existing.getName());
         assertEquals("Brother", existing.getRelationship());
         assertEquals("1234567890", existing.getPhoneNumber());
