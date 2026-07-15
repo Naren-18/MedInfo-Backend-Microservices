@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 @NoArgsConstructor
 @AllArgsConstructor
 public class MedicalProfileResponseDTO {
+    private String publicProfileId;
     @NotNull
     @Min(1)
     @Max(120)

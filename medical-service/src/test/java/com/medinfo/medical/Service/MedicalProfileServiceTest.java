@@ -153,6 +153,7 @@ class MedicalProfileServiceTest {
 
         MedicalProfileResponseDTO result = medicalProfileService.getMyProfile();
 
+        assertEquals("public-uuid-123", result.getPublicProfileId());
         assertEquals(25, result.getAge());
         assertEquals("Male", result.getGender());
         assertEquals("O+", result.getBloodGroup());
