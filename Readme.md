@@ -5,7 +5,8 @@
 In a medical emergency, first responders scan a QR code to instantly access critical health information — blood group, allergies, medications, emergency contacts — **no login required**.
 
 > 📐 Deep-dive documentation: **[Architecture.md](Architecture.md)** — full configs, structure trees, API contracts, and testing details.
-
+   
+   
 ---   
 
 ## 🏗️ Architecture
