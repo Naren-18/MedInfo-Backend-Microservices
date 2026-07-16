@@ -15,7 +15,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      # Exposed as RAILWAY_API_TOKEN (not RAILWAY_TOKEN) because the CLI reads
+      # that env var name to authenticate as an account-scoped token, which is
+      # what --project/--environment require. RAILWAY_TOKEN is treated as a
+      # project token and rejects those flags even when the underlying value
+      # is account-scoped.
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT: production
 
