@@ -17,6 +17,7 @@ jobs:
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: production
 
     steps:
 
@@ -35,6 +36,7 @@ jobs:
           echo "Deploying Config Server..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service config-server \
             --from-source \
             --yes
@@ -51,6 +53,7 @@ jobs:
           echo "Deploying Eureka Server..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service eureka-server \
             --from-source \
             --yes
@@ -67,6 +70,7 @@ jobs:
           echo "Deploying Auth Service..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service auth-service \
             --from-source \
             --yes
@@ -80,6 +84,7 @@ jobs:
           echo "Deploying Medical Service..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service medical-service \
             --from-source \
             --yes
@@ -93,6 +98,7 @@ jobs:
           echo "Deploying Audit Service..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service audit-service \
             --from-source \
             --yes
@@ -109,6 +115,7 @@ jobs:
           echo "Deploying Gateway Service..."
           railway redeploy \
             --project $RAILWAY_PROJECT_ID \
+            --environment $RAILWAY_ENVIRONMENT \
             --service gateway-service \
             --from-source \
             --yes
