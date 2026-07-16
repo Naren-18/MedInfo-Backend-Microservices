@@ -5,8 +5,9 @@
 In a medical emergency, first responders scan a QR code to instantly access critical health information — blood group, allergies, medications, emergency contacts — **no login required**.
 
 > 📐 Deep-dive documentation: **[Architecture.md](Architecture.md)** — full configs, structure trees, API contracts, and testing details.
-
----
+   
+   
+---   
 
 ## 🏗️ Architecture
 
@@ -79,7 +80,7 @@ QR Scan → Redis GET
 | **Medical Service** | 8082 | Medical profiles (incl. `publicProfileId`), emergency contacts, emergency access, Redis cache, Kafka producer |
 | **Audit Service** | 8083 | Audit logging — pure Kafka consumer, no REST API |
 
-> Every service's local config now shrinks to two lines (`spring.application.name` + `spring.config.import=configserver:http://localhost:8888`) — the rest lives in the `medinfo-config` repo. Full reasoning in [Architecture.md](docs/ARCHITECTURE.md).
+> Every service's local config now shrinks to two lines (`spring.application.name` + `spring.config.import=configserver:http://localhost:8888`) — the rest lives in the `medinfo-config` repo. Full reasoning in [Architecture.md](Architecture.md).
 
 ---
 
@@ -90,7 +91,7 @@ QR Scan → Redis GET
 - Spring Cloud
   - Config Server
   - Eureka Server
-  - Gateway
+  - Gateway (reactive, WebFlux)
   - OpenFeign
   - LoadBalancer
 - Spring Security + JWT
@@ -115,12 +116,12 @@ QR Scan → Redis GET
 - **Decentralized JWT validation** — only Auth Service issues tokens; every service validates independently with a shared signing secret. Custom claims (`userId`, `role`) mean zero database lookups downstream.
 - **No cross-service JPA relationships** — `@ManyToOne User` became `Long userId`. The owning service is reached via API, never via its database.
 - **Sync vs async by one question:** does the response depend on the result? Identity resolution → Feign. Audit logging → Kafka.
-- **Feign is now identity-only, not user-resolution.** Since the Day 6 ownership redesign, `AuthClient` resolves `fullName` alone — Medical Service resolves its own `publicProfileId` → `MedicalProfile` locally, with zero Auth Service dependency for the medical-data portion of a response. An Auth outage today only costs one field, not the whole lookup.
+- **Feign is now identity-only, not user-resolution.** Since the `publicProfileId` ownership redesign, `AuthClient` resolves `fullName` alone — Medical Service resolves its own `publicProfileId` → `MedicalProfile` locally, with zero Auth Service dependency for the medical-data portion of a response. An Auth outage today only costs one field, not the whole lookup.
 - **Shared event contract via `medinfo-common`** — `AuditLogEvent` lives in a shared module and is imported by both producer (Medical Service) and consumer (Audit Service). Cross-service deserialization is handled by explicitly whitelisting `com.medinfo.common.events` in the consumer's trusted packages, not by duplicating the class.
 - **Reliable by design, not by luck** — bounded retry (3× with backoff) → Dead Letter Topic for poison messages, and idempotent consumption (unique `eventId` + DB constraint) since Kafka is at-least-once and duplicates are normal.
 - **Bounded contexts** — audit logging was extracted from the Medical Service into its own service with its own database, evolving from local persistence → Feign call → Kafka event.
-- **Cache-Aside on the highest-traffic endpoint** — the public, unauthenticated Emergency Profile API is fronted by Redis; PostgreSQL always stays the source of truth. **Explicit cache eviction on profile update is the primary consistency mechanism**; a 10-min TTL is a secondary safety net for a missed or buggy eviction path, not the primary mechanism itself.
-- **A cache key belongs to the service that owns the resource** — building Redis eviction exposed that `publicProfileId` was owned by Auth Service while Medical Service needed it to invalidate its own cache. Fixed by moving `publicProfileId` to Medical Service, while `fullName` deliberately stayed in Auth Service as identity data. See [Architecture.md](docs/ARCHITECTURE.md) for the full reasoning.
+- **Cache-Aside on the highest-traffic endpoint** — the public, unauthenticated Emergency Profile API is fronted by Redis; PostgreSQL always stays the source of truth. **Explicit cache eviction on profile update is the primary consistency mechanism**; a 10-min TTL is a secondary safety net for a missed or buggy eviction path, not the primary mechanism itself. (Note: `deleteProfile()` does not currently evict the cache — only `updateProfile()` does; see Architecture.md's known-issues notes.)
+- **A cache key belongs to the service that owns the resource** — building Redis eviction exposed that `publicProfileId` was owned by Auth Service while Medical Service needed it to invalidate its own cache. Fixed by moving `publicProfileId` to Medical Service, while `fullName` deliberately stayed in Auth Service as identity data. See [Architecture.md](Architecture.md) for the full reasoning.
 - **Business logic unit tested in isolation** — mocked repositories, mocked Feign clients, mocked SecurityContext, mocked cache service. No DB, no HTTP, no Spring context. JaCoCo coverage on all three business services.
 - **Configuration is centralized, not fully removed** — every service's local config shrank to two lines (`spring.application.name`, `spring.config.import`); everything else moved to a dedicated `medinfo-config` Git repo, fetched via Spring Cloud Config Server at startup. This centralizes almost all runtime configuration, not literally all of it — those two lines still exist locally per service, by design. Trade-off named directly: this removes the bulk of the duplication but makes Config Server a new hard startup dependency for every other service.
 - **A 5-layer logging strategy, with an explicit rule for each layer** — Request (filter: method/URL/IP/status/timing) → Controller (almost nothing) → Service (⭐ most logs live here) → Repository (almost never) → Infrastructure (startup/connection events only). Log level is a signal, not decoration: `WARN` means "unexpected but handled correctly" (cache miss, duplicate Kafka event, retry attempt), `ERROR` means "actually failed" (Feign unreachable, event moved to DLT, unhandled exception).
@@ -139,7 +140,7 @@ Git Push
 GitHub Actions
       │
       ▼
-Build & Test
+Build (mvn clean package -DskipTests)
       │
       ▼
 Docker Image Build
@@ -148,7 +149,7 @@ Docker Image Build
 Push Images to Docker Hub
       │
       ▼
-Railway Deployment
+Railway Deployment (manual)
 ```
 
 **Production services include:**
@@ -163,6 +164,8 @@ Railway Deployment
 - PostgreSQL (Neon)
 
 Configuration is fully externalized using Railway Environment Variables and Spring Cloud Config Server.
+
+> ⚠️ CI currently builds and publishes images but **does not run the test suite** (`-DskipTests`), and Railway deployment is still a manual step, not automated CD. See Architecture.md's CI/CD section.
 
 ---
 
@@ -191,17 +194,13 @@ Health checks ensure services only start after their dependencies become healthy
 
 GitHub Actions automatically performs:
 
-✔ Maven Build
-
-✔ Unit Tests
+✔ Maven Build (`mvn clean package -DskipTests`)
 
 ✔ Docker Image Build
 
 ✔ Docker Hub Push
 
-Every commit to the main branch produces production-ready Docker images.
-
-Images are tagged using `latest` and the Git SHA.
+Every commit to `main` (also triggers on `docker`, `ci-cd`) produces production-ready Docker images, tagged `latest`.
 
 ---
 
@@ -209,13 +208,13 @@ Images are tagged using `latest` and the Git SHA.
 
 These came from actually running the system, not from a tutorial:
 
-1. **`UnknownHostException` at the Gateway** — Eureka registered services under the machine's corporate hostname, which couldn't be resolved locally. Fixed with `eureka.instance.prefer-ip-address=true` on every service.
+1. **`UnknownHostException` at the Gateway** — Eureka registered services under the machine's corporate hostname, which couldn't be resolved locally. Fixed at the time with `eureka.instance.prefer-ip-address=true` on every service.
 2. **Kafka trusted-packages deserialization failure** — the JSON deserializer embeds the producer's class name in message headers by default; without an explicit allowlist, the consumer refuses to deserialize a class from a package it doesn't trust. Fixed by adding `com.medinfo.common.events` to `spring.kafka.consumer.properties.spring.json.trusted.packages` on Audit Service — `AuditLogEvent` is a single shared class in `medinfo-common`, imported by both producer and consumer; the fix was trusting the package, not duplicating the class.
 3. **Feign ErrorDecoder never fires on connection failures** — it only processes HTTP responses. A downed service throws `RetryableException` with no HTTP response at all, so decoder-based handling must be paired with service-level handling (→ 503). Long-term home: Resilience4j circuit breakers.
 4. **Redis deserialization failure — missing no-args constructor** — Jackson couldn't reconstruct cached DTOs (`Cannot construct instance... no default constructor`). Fixed by adding `@NoArgsConstructor` alongside the existing `@Builder`/`@AllArgsConstructor`.
 5. **Gateway never routed `/api/profile`** — discovered while verifying the Redis/ownership redesign end-to-end. `MedicalProfileController` worked when hit directly on port 8082 but 404'd through the Gateway, since the route predicate only matched `/api/medical/**`. Fixed by adding `/api/profile/**` to the route.
 6. **Spring Security filter registration order** — wiring in `RequestLoggingFilter` via `addFilterBefore(requestLoggingFilter, JWTAuthenticationFilter.class)` failed at startup with `"The Filter class ... does not have a registered order"`, in both `auth-service` and `medical-service`. A custom filter has no implicit chain position — it only gets one once it's explicitly registered, and that has to happen *before* anything else references it as an anchor. Fixed by registering `jwtAuthenticationFilter`'s own position first.
-7. **A stale test nobody had compiled since Day 5** — `audit-service`'s `AuditServiceTest` still imported a `CreateAuditLogRequestDTO`/`Enum.AccessMethod` pair deleted back when the REST-based audit endpoint was replaced with Kafka. Never caught because nothing had run a full build across every module (vs. just the ones being actively edited) until this session. Rewritten against the real `createAuditLog(AuditLogEvent)` API.
+7. **A stale test nobody had compiled since the Kafka migration** — `audit-service`'s `AuditServiceTest` still imported a `CreateAuditLogRequestDTO`/`Enum.AccessMethod` pair deleted back when the REST-based audit endpoint was replaced with Kafka. Never caught because nothing had run a full build across every module (vs. just the ones being actively edited) until this was rewritten against the real `createAuditLog(AuditLogEvent)` API.
 
 **Docker Networking**
 
@@ -242,7 +241,9 @@ mvn clean test
 # JaCoCo HTML report → target/site/jacoco/index.html (per service)
 ```
 
-JUnit 5 + Mockito across auth, medical, and audit services — success **and** failure paths: duplicates, missing resources, invalid credentials, cross-user unauthorized access, downstream service unavailability, repository exceptions. Full scenario lists in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+JUnit 5 + Mockito across auth, medical, and audit services — success **and** failure paths: duplicates, missing resources, invalid credentials, cross-user unauthorized access, downstream service unavailability, repository exceptions. Full scenario lists in [Architecture.md](Architecture.md).
+
+> ⚠️ CI currently skips this suite (`-DskipTests`) — tests pass locally but don't yet gate merges.
 
 ---
 
@@ -292,13 +293,15 @@ All APIs via the Gateway: `http://localhost:8080/api/...` — Postman collection
 - [x] Externalized Configuration (.env + Railway Variables)
 - [x] GitHub Actions CI
 - [x] Docker Hub Image Publishing
-- [x] Railway Cloud Deployment
+- [x] Railway Cloud Deployment (manual)
 - [x] Centralized Logging
 - [x] Unit Testing + JaCoCo
 
 ### 🚧 Next Improvements
 
 - [ ] Resilience4j Circuit Breaker
+- [ ] Cache-hit audit logging
+- [ ] Tests gating CI (currently skipped via `-DskipTests`)
 - [ ] Prometheus + Grafana Monitoring
 - [ ] Distributed Tracing (Zipkin/OpenTelemetry)
 - [ ] ELK / Loki Centralized Logs

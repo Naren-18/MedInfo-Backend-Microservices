@@ -89,6 +89,7 @@ public class MedicalProfileService {
                                         userId
                                 ));
         return MedicalProfileResponseDTO.builder()
+                .publicProfileId(medicalProfile.getPublicProfileId())
                 .age(medicalProfile.getAge())
                 .gender(medicalProfile.getGender())
                 .bloodGroup(medicalProfile.getBloodGroup())
