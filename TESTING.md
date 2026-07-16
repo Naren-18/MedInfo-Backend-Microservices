@@ -5,7 +5,7 @@ registering a user to scanning an emergency QR code, including verifying the
 Kafka event and Redis cache side-effects along the way.
 
 All requests below go through the **API Gateway (`:8080`)** — that's the single
-public entry point. Direct service ports (`8081`/`8082`/`8083`) are only used
+public entry point. Direct service ports (`8081`/`8082`/`8083`) are only used  
 for local debugging, not by real clients.
 
 ---
