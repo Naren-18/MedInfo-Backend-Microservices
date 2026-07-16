@@ -43,7 +43,7 @@ services:
     build:
       context: ../auth-service
       dockerfile: Dockerfile
-    image: naren487/a
+    image: naren487/auth-service:latest
     container_name: auth-service
     ports:
       - "8081:8081"
