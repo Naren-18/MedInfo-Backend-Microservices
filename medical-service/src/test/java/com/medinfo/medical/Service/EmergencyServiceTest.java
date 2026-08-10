@@ -7,7 +7,7 @@ import com.medinfo.medical.Entity.EmergencyContacts;
 import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Exception.ServiceUnavailableException;
-import com.medinfo.medical.Producer.AuditEventProducer;
+import com.medinfo.medical.Kafka.AuditEventProducer;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
 import com.medinfo.medical.cache.EmergencyProfileCacheService;

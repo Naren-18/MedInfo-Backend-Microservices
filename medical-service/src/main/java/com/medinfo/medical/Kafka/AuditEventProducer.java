@@ -1,4 +1,4 @@
-package com.medinfo.medical.Producer;
+package com.medinfo.medical.Kafka;
 
 import com.medinfo.common.constants.KafkaTopics;
 import com.medinfo.common.events.AuditLogEvent;
@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 @Slf4j
 public class AuditEventProducer {
-    private final KafkaTemplate<String, AuditLogEvent> kafkaTemplate;
+    private final KafkaTemplate<String, Object> kafkaTemplate;
     public void publishAuditEvent(AuditLogEvent event){
         log.info("Publishing Audit Event. EventId={}, UserId={}", event.getEventId(), event.getUserId());
         kafkaTemplate.send(

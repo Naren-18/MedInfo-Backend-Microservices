@@ -1,4 +1,10 @@
-#PROD
+
+
+
+# Local env
+
+
+
 services:
   config-server:
     build:
@@ -9,6 +15,8 @@ services:
     ports:
       - "8888:8888"
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
     healthcheck:
@@ -22,7 +30,7 @@ services:
     build:
       context: ../eureka-server
       dockerfile: Dockerfile
-    image:  naren487/eureka-server:latest
+    image: naren487/eureka-server:latest
     container_name: eureka-server
     ports:
       - "8761:8761"
@@ -30,6 +38,8 @@ services:
       config-server:
         condition: service_healthy
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
     healthcheck:
@@ -53,14 +63,10 @@ services:
       eureka-server:
         condition: service_healthy
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
-    environment:
-      AUTH_DB_URL: ${AUTH_DB_URL}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/actuator/health"]
       interval: 10s
@@ -86,14 +92,10 @@ services:
       redis:
         condition: service_started
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
-    environment:
-      MEDICAL_DB_URL: ${MEDICAL_DB_URL}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
       interval: 10s
@@ -117,12 +119,10 @@ services:
       kafka:
         condition: service_started
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
-    environment:
-      AUDIT_DB_URL: ${AUDIT_DB_URL}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
       interval: 10s
@@ -150,11 +150,10 @@ services:
       audit-service:
         condition: service_healthy
     restart: unless-stopped
+    env_file:
+      - .env
     networks:
       - medinfo-network
-    environment:
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_EXPIRATION: ${JWT_EXPIRATION}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
       interval: 10s
@@ -210,7 +209,3 @@ services:
 networks:
   medinfo-network:
     driver: bridge
-
-
-
-

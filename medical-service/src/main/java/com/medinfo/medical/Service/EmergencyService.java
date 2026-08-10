@@ -8,16 +8,14 @@ import com.medinfo.medical.Entity.MedicalProfile;
 import com.medinfo.common.enums.AccessMethod;
 import com.medinfo.medical.Exception.ResourceNotFoundException;
 import com.medinfo.medical.Exception.ServiceUnavailableException;
-import com.medinfo.medical.Producer.AuditEventProducer;
+import com.medinfo.medical.Kafka.AuditEventProducer;
 import com.medinfo.medical.Repository.EmergencyContactsRepository;
 import com.medinfo.medical.Repository.MedicalProfileRepository;
 import com.medinfo.medical.cache.EmergencyProfileCacheService;
 import feign.RetryableException;
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;

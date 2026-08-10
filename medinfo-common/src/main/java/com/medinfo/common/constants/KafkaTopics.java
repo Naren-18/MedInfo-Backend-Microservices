@@ -3,6 +3,7 @@ public final class KafkaTopics {
 
     public static final String AUDIT_EVENTS = "emergency-access-events";
     public static final String AUDIT_EVENTS_DLT = "emergency-access-events.DLT";
+    public static final String MEDICAL_REPORT_EVENTS = "medical-report-events";
 
     private KafkaTopics() {}
 }

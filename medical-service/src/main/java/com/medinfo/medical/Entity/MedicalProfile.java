@@ -3,6 +3,8 @@ package com.medinfo.medical.Entity;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.time.LocalDateTime;
+
 @Entity
 @Getter
 @Setter
@@ -23,6 +25,11 @@ public class MedicalProfile {
     private String medicalConditions;
     private String currentMedications;
     private boolean organDonor;
+
+    @Column(columnDefinition = "TEXT")
+    private String aiSummary;
+
+    private LocalDateTime summaryGeneratedAt;
 
     @Column(nullable = false)
     private Long userId;
